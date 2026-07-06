@@ -429,6 +429,23 @@ async fn main() -> Result<()> {
         ),
     }
 
+    // Set max_parallel_maintenance_workers to match the server's max_parallel_workers,
+    // so VACUUM's index-cleanup phase can use the full parallel worker pool
+    // (no effect on Phase 3/freeze, which runs with INDEX_CLEANUP FALSE).
+    match connection::set_max_parallel_maintenance_workers(&client).await {
+        Ok(workers) => logger.log(
+            LogLevel::Info,
+            &format!(
+                "max_parallel_maintenance_workers set to {} (matches max_parallel_workers)",
+                workers
+            ),
+        ),
+        Err(e) => logger.log(
+            LogLevel::Warning,
+            &format!("Could not set max_parallel_maintenance_workers: {}", e),
+        ),
+    }
+
     // Set lock_timeout so VACUUM/ANALYZE fail fast instead of blocking indefinitely.
     connection::set_lock_timeout(&client)
         .await

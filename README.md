@@ -277,6 +277,7 @@ Options:
 - **Size filtering**: `--min-table-size-gb`/`--max-table-size-gb` apply across all four modes
 - **Active-vacuum awareness**: tables with a conflicting VACUUM/autovacuum in progress are skipped, or the conflicting backend is terminated with `--force`
 - **Fast-fail locking**: 10ms `lock_timeout` for the session so runs never block indefinitely behind another process's lock
+- **Automatic session tuning**: `vacuum_buffer_usage_limit` is set to 1/16 of `shared_buffers` (PostgreSQL 16+) and `max_parallel_maintenance_workers` is raised to match the server's `max_parallel_workers`, so VACUUM's index-cleanup phase can use the full parallel worker pool instead of the low built-in default. Both are session-scoped `SET`s, no server config changes required. Neither affects Phase 3 (freeze), which runs with `INDEX_CLEANUP FALSE`.
 - **Wraparound tuning**: flag candidates by absolute XID age (`--wraparound-min-age`) or by percentage of `autovacuum_freeze_max_age` (`--wraparound-pct`)
 - **SSL/TLS**: `disable`/`require`/`verify-ca`/`verify-full`, with custom CA and mutual TLS support
 - **Multiple credential sources**: `PG_PASSWORD`, `PG_PASSWORD_FILE` (Docker/Kubernetes secrets), `.pgpass`/`$PGPASSFILE`, or CLI flag

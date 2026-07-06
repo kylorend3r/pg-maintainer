@@ -320,6 +320,40 @@ pub async fn set_vacuum_buffer_usage_limit(
     Ok((shared_buffers_kb, limit_kb))
 }
 
+/// Set max_parallel_maintenance_workers to match the server's max_parallel_workers.
+///
+/// This lets VACUUM's index-cleanup phase (and CREATE INDEX/REINDEX, if ever run)
+/// use as much of the server's parallel worker pool as it's configured to allow,
+/// rather than being capped by the (often much lower) built-in default of 2.
+/// Note: has no effect on VACUUM calls that pass INDEX_CLEANUP FALSE (Phase 3/freeze),
+/// since there's no index-cleanup phase to parallelize in that case.
+///
+/// Returns the value applied so the caller can log it.
+pub async fn set_max_parallel_maintenance_workers(client: &tokio_postgres::Client) -> Result<i32> {
+    let row = client
+        .query_one(
+            "SELECT current_setting('max_parallel_workers')::int",
+            &[],
+        )
+        .await
+        .context("Failed to read max_parallel_workers")?;
+
+    let max_parallel_workers: i32 = row.get(0);
+
+    client
+        .execute(
+            &format!(
+                "SET max_parallel_maintenance_workers TO {}",
+                max_parallel_workers
+            ),
+            &[],
+        )
+        .await
+        .context("Failed to set max_parallel_maintenance_workers")?;
+
+    Ok(max_parallel_workers)
+}
+
 pub fn format_kb_readable(kb: i64) -> String {
     if kb >= 1_048_576 {
         format!("{:.1}GB", kb as f64 / 1_048_576.0)
