@@ -1,0 +1,51 @@
+# pg-maintainer configuration file (TOML)
+# CLI arguments take precedence over values defined here.
+
+# ── Connection ────────────────────────────────────────────────────────────────
+host     = "localhost"
+port     = 5432
+database = "postgres"
+username = "postgres"
+# Recommended: reference an environment variable instead of a plaintext password.
+password = "${PG_PASSWORD}"
+# password = "mypassword"  # plaintext also works but is less secure
+
+# ── Schema & Table selection ──────────────────────────────────────────────────
+# schema = "public"               # single schema
+# schema = "public,analytics"     # comma-separated list
+discover-all-schemas = false       # set true to maintain every user schema
+# table = "orders"                # limit all phases to a single table
+
+# ── Maintenance modes ────────────────────────────────────────────────────────
+dry-run = false              # show commands without executing them
+force   = false              # terminate active vacuums before starting
+# mode  = "vacuum,analyze,freeze,bloat"  # comma-separated modes to run
+                             # default (omitted): all four modes
+
+# ── Bloat detection (Phase 4) ─────────────────────────────────────────────────
+bloat-threshold-pct = 80.0   # flag tables with > this % dead tuples
+
+# ── Table size filtering (applies to all modes) ───────────────────────────────
+# min-table-size-gb = 0.1    # exclude tables smaller than this
+# max-table-size-gb = 10.0   # exclude tables larger than this
+
+# ── Wraparound threshold ──────────────────────────────────────────────────────
+# Tables whose XID age exceeds this value will be freeze-vacuumed.
+# Default matches PostgreSQL's autovacuum_freeze_max_age (200 000 000).
+wraparound-min-age = 200000000
+# wraparound-pct = 80        # (optional) flag tables at this % toward wraparound;
+                             # overrides wraparound-min-age when set
+
+# ── Maintenance memory ────────────────────────────────────────────────────────
+maintenance-work-mem-gb = 1   # max: 32
+
+# ── SSL ───────────────────────────────────────────────────────────────────────
+sslmode = "disable"   # disable | require | verify-ca | verify-full
+# ssl-ca-cert     = "/path/to/ca.pem"
+# ssl-client-cert = "/path/to/client.pem"
+# ssl-client-key  = "/path/to/client.key"
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+log-file     = "maintainer.log"
+log-format   = "text"    # text | json
+silence-mode = false     # suppress terminal output; logs still written to file

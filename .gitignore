@@ -1,0 +1,32 @@
+# Rust build artifacts
+target/
+Cargo.lock
+
+# Log files produced by the tool
+*.log
+
+# macOS
+.DS_Store
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Environment files
+.env
+.env.*
+
+# Config files with real credentials (keep config.example.toml)
+config.toml
+
+# Claude Code project guidance (local dev only)
+CLAUDE.md
+
+# Local test-fixture schema/DML (not part of the shipped tool)
+schema/
+
+# Design docs / planning scratch (not part of the shipped tool)
+plans-designs/

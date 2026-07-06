@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:latest
+    command: ["postgres", "-c", "autovacuum=off"]
+    environment:
+      POSTGRES_USER: pgm_test
+      POSTGRES_PASSWORD: pgm_test
+      POSTGRES_DB: pgm_test
+    ports:
+      - "5432:5432"
+    tmpfs:
+      - /var/lib/postgresql
+    volumes:
+      - ./schema:/schema:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pgm_test -d pgm_test"]
+      interval: 2s
+      timeout: 2s
+      retries: 30

@@ -1,0 +1,13 @@
+target/
+schema/
+plans-designs/
+*.log
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.env
+.env.*
