@@ -120,33 +120,33 @@ fn test_maintenance_work_mem_default() {
 // ── Mode selection ────────────────────────────────────────────────────────────
 
 #[test]
-fn test_mode_single_vacuum() {
+fn test_mode_single_never_vacuumed() {
     cmd()
         .arg("--schema").arg("public")
-        .arg("--mode").arg("vacuum")
+        .arg("--mode").arg("never-vacuumed")
         .env_clear()
         .assert()
-        .code(predicate::ne(2));
+        .stderr(predicate::str::contains("Invalid mode").not());
 }
 
 #[test]
 fn test_mode_multiple_comma_separated() {
     cmd()
         .arg("--schema").arg("public")
-        .arg("--mode").arg("vacuum,analyze,freeze")
+        .arg("--mode").arg("never-vacuumed,never-analyzed,wraparound")
         .env_clear()
         .assert()
-        .code(predicate::ne(2));
+        .stderr(predicate::str::contains("Invalid mode").not());
 }
 
 #[test]
-fn test_mode_all_four() {
+fn test_mode_all_five() {
     cmd()
         .arg("--schema").arg("public")
-        .arg("--mode").arg("vacuum,analyze,freeze,bloat")
+        .arg("--mode").arg("never-vacuumed,never-analyzed,wraparound,bloated,stale-stats")
         .env_clear()
         .assert()
-        .code(predicate::ne(2));
+        .stderr(predicate::str::contains("Invalid mode").not());
 }
 
 #[test]
@@ -164,10 +164,10 @@ fn test_mode_invalid_name() {
 fn test_mode_case_insensitive() {
     cmd()
         .arg("--schema").arg("public")
-        .arg("--mode").arg("VACUUM,Analyze,FREEZE,bloat")
+        .arg("--mode").arg("NEVER-VACUUMED,Never-Analyzed,WRAPAROUND,bloated")
         .env_clear()
         .assert()
-        .code(predicate::ne(2));
+        .stderr(predicate::str::contains("Invalid mode").not());
 }
 
 #[test]

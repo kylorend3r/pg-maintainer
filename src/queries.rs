@@ -128,6 +128,7 @@ pub const FIND_NEVER_ANALYZED_TABLE: &str = r#"
 ///   $2 = minimum XID age threshold (bigint) — defaults to autovacuum_freeze_max_age
 ///   $3 = minimum table size in bytes (i64)
 ///   $4 = maximum table size in bytes (i64)
+///   $5 = limit (i64, use i64::MAX for no limit)
 pub const FIND_WRAPAROUND_CANDIDATES: &str = r#"
     SELECT
         n.nspname                                               AS schema_name,
@@ -141,7 +142,8 @@ pub const FIND_WRAPAROUND_CANDIDATES: &str = r#"
       AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
       AND age(c.relfrozenxid) > $2::bigint
       AND pg_table_size(c.oid) BETWEEN $3 AND $4
-    ORDER BY age(c.relfrozenxid) DESC;
+    ORDER BY age(c.relfrozenxid) DESC
+    LIMIT $5;
 "#;
 
 /// Same as FIND_WRAPAROUND_CANDIDATES but scoped to a single table.
@@ -172,6 +174,11 @@ pub const FIND_WRAPAROUND_CANDIDATES_TABLE: &str = r#"
 /// Used to convert a wraparound-percentage threshold into an absolute XID age.
 pub const GET_FREEZE_MAX_AGE: &str =
     "SELECT current_setting('autovacuum_freeze_max_age')::bigint";
+
+/// The server's numeric version (server_version_num), e.g. 160003 for 16.3.
+/// Used by connection::connect() to enforce the PostgreSQL 14 minimum.
+pub const GET_SERVER_VERSION_NUM: &str =
+    "SELECT current_setting('server_version_num')::int";
 
 /// The server's autovacuum_analyze_threshold and autovacuum_analyze_scale_factor
 /// settings. Used as the default stale-stats thresholds unless overridden by

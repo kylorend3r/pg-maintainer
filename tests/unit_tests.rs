@@ -198,6 +198,27 @@ fn test_find_wraparound_candidates_table_uses_any_cast() {
         "FIND_WRAPAROUND_CANDIDATES_TABLE must bind table name as $3");
 }
 
+#[test]
+fn test_partition_excluding_queries_all_filter_relkind_p() {
+    let queries_to_check = [
+        ("FIND_NEVER_VACUUMED", queries::FIND_NEVER_VACUUMED),
+        ("FIND_NEVER_VACUUMED_TABLE", queries::FIND_NEVER_VACUUMED_TABLE),
+        ("FIND_NEVER_ANALYZED", queries::FIND_NEVER_ANALYZED),
+        ("FIND_NEVER_ANALYZED_TABLE", queries::FIND_NEVER_ANALYZED_TABLE),
+        ("FIND_BLOAT_CANDIDATES", queries::FIND_BLOAT_CANDIDATES),
+        ("FIND_BLOAT_CANDIDATES_TABLE", queries::FIND_BLOAT_CANDIDATES_TABLE),
+        ("FIND_STALE_STATS", queries::FIND_STALE_STATS),
+        ("FIND_STALE_STATS_TABLE", queries::FIND_STALE_STATS_TABLE),
+    ];
+    for (name, sql) in &queries_to_check {
+        assert!(
+            sql.contains("relkind != 'p'"),
+            "{} must exclude partitioned parent tables (relkind != 'p')",
+            name
+        );
+    }
+}
+
 // ── Mode ───────────────────────────────────────────────────────────────────────
 
 #[test]

@@ -145,7 +145,7 @@ fn escape_libpq_value(s: &str) -> String {
 /// Returns the server's numeric version (server_version_num), e.g. 160003 for 16.3.
 pub async fn get_server_version_num(client: &tokio_postgres::Client) -> Result<i32> {
     let row = client
-        .query_one("SELECT current_setting('server_version_num')::int", &[])
+        .query_one(crate::queries::GET_SERVER_VERSION_NUM, &[])
         .await
         .context("Failed to read server_version_num")?;
     Ok(row.get(0))

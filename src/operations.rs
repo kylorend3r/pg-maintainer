@@ -86,6 +86,7 @@ pub async fn find_wraparound_candidates(
     table: Option<&str>,
     min_bytes: i64,
     max_bytes: i64,
+    limit: i64,
 ) -> Result<Vec<FreezeTableInfo>> {
     let schemas_vec: Vec<String> = schemas.to_vec();
     let rows = if let Some(tbl) = table {
@@ -98,7 +99,7 @@ pub async fn find_wraparound_candidates(
             .map_err(|e| anyhow::anyhow!("Failed to query wraparound candidates: {}", e))?
     } else {
         client
-            .query(queries::FIND_WRAPAROUND_CANDIDATES, &[&schemas_vec, &min_age, &min_bytes, &max_bytes])
+            .query(queries::FIND_WRAPAROUND_CANDIDATES, &[&schemas_vec, &min_age, &min_bytes, &max_bytes, &limit])
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query wraparound candidates: {}", e))?
     };
@@ -324,12 +325,12 @@ async fn handle_active_vacuums(
 
     let autovacuum_pids: Vec<i32> = active_sessions
         .iter()
-        .filter(|(_, backend_type)| backend_type == "autovacuum worker")
+        .filter(|(_, backend_type)| backend_type == BACKEND_TYPE_AUTOVACUUM_WORKER)
         .map(|(pid, _)| *pid)
         .collect();
     let manual_pids: Vec<i32> = active_sessions
         .iter()
-        .filter(|(_, backend_type)| backend_type != "autovacuum worker")
+        .filter(|(_, backend_type)| backend_type != BACKEND_TYPE_AUTOVACUUM_WORKER)
         .map(|(pid, _)| *pid)
         .collect();
 
@@ -410,29 +411,18 @@ const OP_VACUUM: &str = "VACUUM";
 const OP_ANALYZE: &str = "ANALYZE";
 const OP_FREEZE: &str = "VACUUM FREEZE";
 const OP_BLOAT: &str = "VACUUM (BLOAT)";
+const BACKEND_TYPE_AUTOVACUUM_WORKER: &str = "autovacuum worker";
 
 /// Vacuum all tables that have never been vacuumed.
-/// If `table` is Some, only that table is checked and (if eligible) vacuumed.
 /// If `force` is true, active vacuums on the table are terminated before starting.
 /// Otherwise tables with an active vacuum are skipped.
 pub async fn run_vacuum_never_vacuumed(
     client: &Client,
-    schemas: &[String],
-    table: Option<&str>,
+    tables: &[TableInfo],
     dry_run: bool,
     force: bool,
-    min_bytes: i64,
-    max_bytes: i64,
-    limit: i64,
     logger: &Arc<Logger>,
 ) -> Result<OperationSummary> {
-    logger.log(
-        LogLevel::Info,
-        "Searching for tables that have never been vacuumed...",
-    );
-
-    let tables = find_never_vacuumed(client, schemas, table, min_bytes, max_bytes, limit).await?;
-
     let mut summary = OperationSummary::default();
     summary.total = tables.len();
 
@@ -508,22 +498,11 @@ pub async fn run_vacuum_never_vacuumed(
 /// Otherwise tables with an active vacuum are skipped.
 pub async fn run_analyze_never_analyzed(
     client: &Client,
-    schemas: &[String],
-    table: Option<&str>,
+    tables: &[TableInfo],
     dry_run: bool,
     force: bool,
-    min_bytes: i64,
-    max_bytes: i64,
-    limit: i64,
     logger: &Arc<Logger>,
 ) -> Result<OperationSummary> {
-    logger.log(
-        LogLevel::Info,
-        "Searching for tables that have never been analyzed...",
-    );
-
-    let tables = find_never_analyzed(client, schemas, table, min_bytes, max_bytes, limit).await?;
-
     let mut summary = OperationSummary::default();
     summary.total = tables.len();
 
@@ -594,29 +573,15 @@ pub async fn run_analyze_never_analyzed(
 }
 
 /// Run VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE) on all wraparound candidates.
-/// If `table` is Some, only that table is checked and (if eligible) freeze-vacuumed.
 /// If `force` is true, active vacuums on the table are terminated before starting.
 /// Otherwise tables with an active vacuum are skipped.
 pub async fn run_freeze_wraparound(
     client: &Client,
-    schemas: &[String],
-    table: Option<&str>,
-    min_age: i64,
+    tables: &[FreezeTableInfo],
     dry_run: bool,
     force: bool,
-    min_bytes: i64,
-    max_bytes: i64,
     logger: &Arc<Logger>,
 ) -> Result<OperationSummary> {
-    logger.log(
-        LogLevel::Info,
-        &format!(
-            "Searching for wraparound candidates (XID age > {})...",
-            min_age
-        ),
-    );
-
-    let tables = find_wraparound_candidates(client, schemas, min_age, table, min_bytes, max_bytes).await?;
 
     let mut summary = OperationSummary::default();
     summary.total = tables.len();
@@ -637,7 +602,7 @@ pub async fn run_freeze_wraparound(
         ),
     );
 
-    for t in &tables {
+    for t in tables {
         logger.log_with_context(
             LogLevel::Warning,
             &format!(
@@ -720,38 +685,12 @@ pub async fn run_freeze_wraparound(
 /// Tables already vacuumed by earlier phases are skipped (tracked in `already_handled`).
 pub async fn run_bloat_vacuum(
     client: &Client,
-    schemas: &[String],
-    table: Option<&str>,
-    bloat_threshold_pct: f64,
-    bloat_min_dead_tup: i64,
+    tables: &[BloatTableInfo],
     dry_run: bool,
     force: bool,
-    min_bytes: i64,
-    max_bytes: i64,
     already_handled: &std::collections::HashSet<(String, String)>,
-    limit: i64,
     logger: &Arc<Logger>,
 ) -> Result<OperationSummary> {
-    logger.log(
-        LogLevel::Info,
-        &format!(
-            "Searching for bloat candidates (>{:.1}% dead tuples)...",
-            bloat_threshold_pct
-        ),
-    );
-
-    let tables = find_bloat_candidates(
-        client,
-        schemas,
-        table,
-        bloat_threshold_pct,
-        bloat_min_dead_tup,
-        min_bytes,
-        max_bytes,
-        limit,
-    )
-    .await?;
-
     let mut summary = OperationSummary::default();
     summary.total = tables.len();
 
@@ -845,38 +784,14 @@ pub async fn run_bloat_vacuum(
 /// Tables already analyzed by earlier phases are skipped (tracked in `already_handled`).
 pub async fn run_stale_stats_analyze(
     client: &Client,
-    schemas: &[String],
-    table: Option<&str>,
+    tables: &[crate::types::StaleStatsTableInfo],
     analyze_threshold: i64,
     analyze_scale_factor: f64,
     dry_run: bool,
     force: bool,
-    min_bytes: i64,
-    max_bytes: i64,
     already_handled: &std::collections::HashSet<(String, String)>,
-    limit: i64,
     logger: &Arc<Logger>,
 ) -> Result<OperationSummary> {
-    logger.log(
-        LogLevel::Info,
-        &format!(
-            "Searching for stale-stats candidates (modifications > {} + {:.2}% × live rows)...",
-            analyze_threshold, analyze_scale_factor * 100.0
-        ),
-    );
-
-    let tables = find_stale_stats_candidates(
-        client,
-        schemas,
-        table,
-        analyze_threshold,
-        analyze_scale_factor,
-        min_bytes,
-        max_bytes,
-        limit,
-    )
-    .await?;
-
     let mut summary = OperationSummary::default();
     summary.total = tables.len();
 

@@ -494,39 +494,6 @@ async fn main() -> Result<()> {
     // Resolve --limit (default to no limit if not specified)
     let limit_n = args.limit.unwrap_or(i64::MAX);
 
-    // Read autovacuum_analyze_threshold / autovacuum_analyze_scale_factor from the server;
-    // --analyze-threshold / --analyze-scale-factor override per-run if given.
-    let (server_analyze_threshold, server_analyze_scale_factor) =
-        match operations::get_analyze_settings(&client).await {
-            Ok(v) => v,
-            Err(e) => {
-                logger.log(
-                    LogLevel::Warning,
-                    &format!(
-                        "Could not read autovacuum_analyze settings from server, \
-                         falling back to defaults ({}, {}): {}",
-                        pg_maintainer::config::DEFAULT_ANALYZE_THRESHOLD,
-                        pg_maintainer::config::DEFAULT_ANALYZE_SCALE_FACTOR,
-                        e
-                    ),
-                );
-                (
-                    pg_maintainer::config::DEFAULT_ANALYZE_THRESHOLD,
-                    pg_maintainer::config::DEFAULT_ANALYZE_SCALE_FACTOR,
-                )
-            }
-        };
-    let effective_analyze_threshold = args.analyze_threshold.unwrap_or(server_analyze_threshold);
-    let effective_analyze_scale_factor = args.analyze_scale_factor.unwrap_or(server_analyze_scale_factor);
-    logger.log(
-        LogLevel::Info,
-        &format!(
-            "Stale-stats thresholds: analyze_threshold={} (server: {}), analyze_scale_factor={} (server: {})",
-            effective_analyze_threshold, server_analyze_threshold,
-            effective_analyze_scale_factor, server_analyze_scale_factor,
-        ),
-    );
-
     // Resolve schemas
     let schemas: Vec<String> = if args.discover_all_schemas && args.schema.is_none() {
         logger.log(LogLevel::Info, "Discovering all user schemas...");
@@ -599,13 +566,16 @@ async fn main() -> Result<()> {
     // ── Phase 1: VACUUM never-vacuumed tables ─────────────────────────────────
     let vacuum_summary = if enabled_modes.contains(&Mode::NeverVacuumed) {
         logger.log(LogLevel::Info, "═══ Phase 1: VACUUM (never vacuumed) ═══");
-        let summary = operations::run_vacuum_never_vacuumed(&client, &schemas, table_filter, args.dry_run, args.force, min_bytes, max_bytes, limit_n, &logger)
+        logger.log(LogLevel::Info, "Searching for tables that have never been vacuumed...");
+        let candidates = operations::find_never_vacuumed(&client, &schemas, table_filter, min_bytes, max_bytes, limit_n)
             .await
-            .context("VACUUM phase failed")?;
-        for t in operations::find_never_vacuumed(&client, &schemas, table_filter, min_bytes, max_bytes, limit_n).await.unwrap_or_default().iter() {
+            .context("Failed to query never-vacuumed tables")?;
+        for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
         }
-        summary
+        operations::run_vacuum_never_vacuumed(&client, &candidates, args.dry_run, args.force, &logger)
+            .await
+            .context("VACUUM phase failed")?
     } else {
         logger.log(LogLevel::Info, "Skipping Phase 1: VACUUM (not in --mode)");
         Default::default()
@@ -614,13 +584,16 @@ async fn main() -> Result<()> {
     // ── Phase 2: ANALYZE never-analyzed tables ────────────────────────────────
     let analyze_summary = if enabled_modes.contains(&Mode::NeverAnalyzed) {
         logger.log(LogLevel::Info, "═══ Phase 2: ANALYZE (never analyzed) ═══");
-        let summary = operations::run_analyze_never_analyzed(&client, &schemas, table_filter, args.dry_run, args.force, min_bytes, max_bytes, limit_n, &logger)
+        logger.log(LogLevel::Info, "Searching for tables that have never been analyzed...");
+        let candidates = operations::find_never_analyzed(&client, &schemas, table_filter, min_bytes, max_bytes, limit_n)
             .await
-            .context("ANALYZE phase failed")?;
-        for t in operations::find_never_analyzed(&client, &schemas, table_filter, min_bytes, max_bytes, limit_n).await.unwrap_or_default().iter() {
+            .context("Failed to query never-analyzed tables")?;
+        for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
         }
-        summary
+        operations::run_analyze_never_analyzed(&client, &candidates, args.dry_run, args.force, &logger)
+            .await
+            .context("ANALYZE phase failed")?
     } else {
         logger.log(LogLevel::Info, "Skipping Phase 2: ANALYZE (not in --mode)");
         Default::default()
@@ -632,23 +605,15 @@ async fn main() -> Result<()> {
             LogLevel::Info,
             "═══ Phase 3: VACUUM FREEZE (wraparound candidates) ═══",
         );
-        let summary = operations::run_freeze_wraparound(
-            &client,
-            &schemas,
-            table_filter,
-            effective_wraparound_min_age,
-            args.dry_run,
-            args.force,
-            min_bytes,
-            max_bytes,
-            &logger,
-        )
-        .await
-        .context("VACUUM FREEZE phase failed")?;
-        for t in operations::find_wraparound_candidates(&client, &schemas, effective_wraparound_min_age, table_filter, min_bytes, max_bytes).await.unwrap_or_default().iter() {
+        let candidates = operations::find_wraparound_candidates(&client, &schemas, effective_wraparound_min_age, table_filter, min_bytes, max_bytes, limit_n)
+            .await
+            .context("Failed to query wraparound candidates")?;
+        for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
         }
-        summary
+        operations::run_freeze_wraparound(&client, &candidates, args.dry_run, args.force, &logger)
+            .await
+            .context("VACUUM FREEZE phase failed")?
     } else {
         logger.log(LogLevel::Info, "Skipping Phase 3: VACUUM FREEZE (not in --mode)");
         Default::default()
@@ -657,22 +622,33 @@ async fn main() -> Result<()> {
     // ── Phase 4: VACUUM bloat candidates ─────────────────────────────────────
     let bloat_summary = if enabled_modes.contains(&Mode::Bloated) {
         logger.log(LogLevel::Info, "═══ Phase 4: VACUUM (bloat) ═══");
-        operations::run_bloat_vacuum(
+        logger.log(LogLevel::Info, &format!("Searching for bloat candidates (>{:.1}% dead tuples)...", args.bloat_threshold_pct));
+        let candidates = operations::find_bloat_candidates(
             &client,
             &schemas,
             table_filter,
             args.bloat_threshold_pct,
             pg_maintainer::config::DEFAULT_BLOAT_MIN_DEAD_TUP,
-            args.dry_run,
-            args.force,
             min_bytes,
             max_bytes,
-            &already_handled,
             limit_n,
+        )
+        .await
+        .context("Failed to query bloat candidates")?;
+        let summary = operations::run_bloat_vacuum(
+            &client,
+            &candidates,
+            args.dry_run,
+            args.force,
+            &already_handled,
             &logger,
         )
         .await
-        .context("VACUUM BLOAT phase failed")?
+        .context("VACUUM BLOAT phase failed")?;
+        for t in &candidates {
+            already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
+        }
+        summary
     } else {
         logger.log(LogLevel::Info, "Skipping Phase 4: VACUUM (bloat) (not in --mode)");
         Default::default()
@@ -681,22 +657,73 @@ async fn main() -> Result<()> {
     // ── Phase 5: ANALYZE stale-stats candidates ──────────────────────────────
     let stale_stats_summary = if enabled_modes.contains(&Mode::StaleStats) {
         logger.log(LogLevel::Info, "═══ Phase 5: ANALYZE (stale stats) ═══");
-        operations::run_stale_stats_analyze(
+
+        let (server_analyze_threshold, server_analyze_scale_factor) =
+            match operations::get_analyze_settings(&client).await {
+                Ok(v) => v,
+                Err(e) => {
+                    logger.log(
+                        LogLevel::Warning,
+                        &format!(
+                            "Could not read autovacuum_analyze settings from server, \
+                             falling back to defaults ({}, {}): {}",
+                            pg_maintainer::config::DEFAULT_ANALYZE_THRESHOLD,
+                            pg_maintainer::config::DEFAULT_ANALYZE_SCALE_FACTOR,
+                            e
+                        ),
+                    );
+                    (
+                        pg_maintainer::config::DEFAULT_ANALYZE_THRESHOLD,
+                        pg_maintainer::config::DEFAULT_ANALYZE_SCALE_FACTOR,
+                    )
+                }
+            };
+        let effective_analyze_threshold = args.analyze_threshold.unwrap_or(server_analyze_threshold);
+        let effective_analyze_scale_factor = args.analyze_scale_factor.unwrap_or(server_analyze_scale_factor);
+        logger.log(
+            LogLevel::Info,
+            &format!(
+                "Stale-stats thresholds: analyze_threshold={} (server: {}), analyze_scale_factor={} (server: {})",
+                effective_analyze_threshold, server_analyze_threshold,
+                effective_analyze_scale_factor, server_analyze_scale_factor,
+            ),
+        );
+
+        logger.log(
+            LogLevel::Info,
+            &format!(
+                "Searching for stale-stats candidates (modifications > {} + {:.2}% × live rows)...",
+                effective_analyze_threshold, effective_analyze_scale_factor * 100.0
+            ),
+        );
+        let candidates = operations::find_stale_stats_candidates(
             &client,
             &schemas,
             table_filter,
             effective_analyze_threshold,
             effective_analyze_scale_factor,
-            args.dry_run,
-            args.force,
             min_bytes,
             max_bytes,
-            &already_handled,
             limit_n,
+        )
+        .await
+        .context("Failed to query stale-stats candidates")?;
+        let summary = operations::run_stale_stats_analyze(
+            &client,
+            &candidates,
+            effective_analyze_threshold,
+            effective_analyze_scale_factor,
+            args.dry_run,
+            args.force,
+            &already_handled,
             &logger,
         )
         .await
-        .context("ANALYZE STALE STATS phase failed")?
+        .context("ANALYZE STALE STATS phase failed")?;
+        for t in &candidates {
+            already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
+        }
+        summary
     } else {
         logger.log(LogLevel::Info, "Skipping Phase 5: ANALYZE (stale stats) (not in --mode)");
         Default::default()

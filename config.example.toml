@@ -18,7 +18,7 @@ discover-all-schemas = false       # set true to maintain every user schema
 
 # ── Maintenance modes ────────────────────────────────────────────────────────
 dry-run = false              # show commands without executing them
-limit   = 100                # cap each mode to top N tables (optional, default: unlimited)
+# limit   = 100                # cap each mode to top N tables (optional, default: unlimited)
 force   = false              # terminate conflicting manual VACUUM sessions; autovacuum is always terminated
 # mode  = "never-vacuumed,never-analyzed,wraparound,bloated,stale-stats"
                              # comma-separated modes to run

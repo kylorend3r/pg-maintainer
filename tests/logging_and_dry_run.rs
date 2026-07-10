@@ -174,11 +174,11 @@ fn test_default_log_file_does_not_cause_parse_error() {
 fn test_mode_flag_with_dry_run() {
     cmd()
         .arg("--schema").arg("public")
-        .arg("--mode").arg("vacuum,analyze,freeze,bloat")
+        .arg("--mode").arg("never-vacuumed,never-analyzed,wraparound,bloated,stale-stats")
         .arg("--dry-run")
         .env_clear()
         .assert()
-        .code(predicate::ne(2));
+        .stderr(predicate::str::contains("Invalid mode").not());
 }
 
 #[test]
@@ -186,11 +186,11 @@ fn test_bloat_threshold_pct_with_dry_run() {
     cmd()
         .arg("--schema").arg("public")
         .arg("--bloat-threshold-pct").arg("70")
-        .arg("--mode").arg("bloat")
+        .arg("--mode").arg("bloated")
         .arg("--dry-run")
         .env_clear()
         .assert()
-        .code(predicate::ne(2));
+        .stderr(predicate::str::contains("Invalid mode").not());
 }
 
 #[test]
@@ -203,6 +203,18 @@ fn test_size_filters_with_dry_run() {
         .env_clear()
         .assert()
         .code(predicate::ne(2));
+}
+
+#[test]
+fn test_limit_applies_to_wraparound_mode() {
+    cmd()
+        .arg("--schema").arg("public")
+        .arg("--mode").arg("wraparound")
+        .arg("--limit").arg("5")
+        .arg("--dry-run")
+        .env_clear()
+        .assert()
+        .stderr(predicate::str::contains("Invalid mode").not());
 }
 
 // ── Integration placeholder (requires live DB) ─────────────────────────────────
