@@ -16,6 +16,7 @@ pub async fn find_never_vacuumed(
     table: Option<&str>,
     min_bytes: i64,
     max_bytes: i64,
+    limit: i64,
 ) -> Result<Vec<TableInfo>> {
     // Vec<String> implements ToSql for array binding; &[String] does not.
     let schemas_vec: Vec<String> = schemas.to_vec();
@@ -26,7 +27,7 @@ pub async fn find_never_vacuumed(
             .map_err(|e| anyhow::anyhow!("Failed to query never-vacuumed tables: {}", e))?
     } else {
         client
-            .query(queries::FIND_NEVER_VACUUMED, &[&schemas_vec, &min_bytes, &max_bytes])
+            .query(queries::FIND_NEVER_VACUUMED, &[&schemas_vec, &min_bytes, &max_bytes, &limit])
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query never-vacuumed tables: {}", e))?
     };
@@ -50,6 +51,7 @@ pub async fn find_never_analyzed(
     table: Option<&str>,
     min_bytes: i64,
     max_bytes: i64,
+    limit: i64,
 ) -> Result<Vec<TableInfo>> {
     let schemas_vec: Vec<String> = schemas.to_vec();
     let rows = if let Some(tbl) = table {
@@ -59,7 +61,7 @@ pub async fn find_never_analyzed(
             .map_err(|e| anyhow::anyhow!("Failed to query never-analyzed tables: {}", e))?
     } else {
         client
-            .query(queries::FIND_NEVER_ANALYZED, &[&schemas_vec, &min_bytes, &max_bytes])
+            .query(queries::FIND_NEVER_ANALYZED, &[&schemas_vec, &min_bytes, &max_bytes, &limit])
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query never-analyzed tables: {}", e))?
     };
@@ -122,6 +124,7 @@ pub async fn find_bloat_candidates(
     bloat_min_dead_tup: i64,
     min_bytes: i64,
     max_bytes: i64,
+    limit: i64,
 ) -> Result<Vec<BloatTableInfo>> {
     let schemas_vec: Vec<String> = schemas.to_vec();
     let rows = if let Some(tbl) = table {
@@ -136,7 +139,7 @@ pub async fn find_bloat_candidates(
         client
             .query(
                 queries::FIND_BLOAT_CANDIDATES,
-                &[&schemas_vec, &bloat_threshold_pct, &bloat_min_dead_tup, &min_bytes, &max_bytes],
+                &[&schemas_vec, &bloat_threshold_pct, &bloat_min_dead_tup, &min_bytes, &max_bytes, &limit],
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query bloat candidates: {}", e))?
@@ -153,7 +156,7 @@ pub async fn find_bloat_candidates(
         .collect())
 }
 
-// ─── Freeze max age ───────────────────────────────────────────────────────────
+// ─── Settings reads ───────────────────────────────────────────────────────────
 
 /// Returns the server's autovacuum_freeze_max_age as a transaction count.
 /// Used to convert a percentage threshold into an absolute XID age.
@@ -165,12 +168,64 @@ pub async fn get_freeze_max_age(client: &Client) -> Result<i64> {
     Ok(row.get::<_, i64>(0))
 }
 
+/// Returns the server's autovacuum_analyze_threshold and autovacuum_analyze_scale_factor
+/// as configured on the connected server.
+pub async fn get_analyze_settings(client: &Client) -> Result<(i64, f64)> {
+    let row = client
+        .query_one(queries::GET_ANALYZE_SETTINGS, &[])
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read autovacuum_analyze settings: {}", e))?;
+    Ok((row.get::<_, i64>("analyze_threshold"), row.get::<_, f64>("analyze_scale_factor")))
+}
+
+/// Returns tables where modifications since the last analyze exceed the threshold.
+/// If `table` is Some, only that table is checked.
+pub async fn find_stale_stats_candidates(
+    client: &Client,
+    schemas: &[String],
+    table: Option<&str>,
+    analyze_threshold: i64,
+    analyze_scale_factor: f64,
+    min_bytes: i64,
+    max_bytes: i64,
+    limit: i64,
+) -> Result<Vec<crate::types::StaleStatsTableInfo>> {
+    let schemas_vec: Vec<String> = schemas.to_vec();
+    let rows = if let Some(tbl) = table {
+        client
+            .query(
+                queries::FIND_STALE_STATS_TABLE,
+                &[&schemas_vec, &tbl, &analyze_threshold, &analyze_scale_factor, &min_bytes, &max_bytes],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to query stale-stats candidates: {}", e))?
+    } else {
+        client
+            .query(
+                queries::FIND_STALE_STATS,
+                &[&schemas_vec, &analyze_threshold, &analyze_scale_factor, &min_bytes, &max_bytes, &limit],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to query stale-stats candidates: {}", e))?
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(|row| crate::types::StaleStatsTableInfo {
+            schema_name: row.get("schemaname"),
+            table_name: row.get("tablename"),
+            n_live_tup: row.get("n_live_tup"),
+            n_mod_since_analyze: row.get("n_mod_since_analyze"),
+        })
+        .collect())
+}
+
 // ─── Active vacuum detection ──────────────────────────────────────────────────
 
 /// Returns the PIDs of any VACUUM or autovacuum workers currently running on
-/// the given table. Both manual VACUUM and autovacuum appear in
-/// pg_stat_progress_vacuum.
-async fn find_active_vacuums(client: &Client, schema: &str, table: &str) -> Result<Vec<i32>> {
+/// the given table, along with backend_type so the caller can distinguish
+/// autovacuum workers from manual VACUUM sessions.
+async fn find_active_vacuums(client: &Client, schema: &str, table: &str) -> Result<Vec<(i32, String)>> {
     let rows = client
         .query(queries::FIND_ACTIVE_VACUUMS_ON_TABLE, &[&schema, &table])
         .await
@@ -182,7 +237,7 @@ async fn find_active_vacuums(client: &Client, schema: &str, table: &str) -> Resu
                 e
             )
         })?;
-    Ok(rows.into_iter().map(|row| row.get::<_, i32>("pid")).collect())
+    Ok(rows.into_iter().map(|row| (row.get::<_, i32>("pid"), row.get::<_, String>("backend_type"))).collect())
 }
 
 /// Terminate the given backend PIDs via pg_terminate_backend().
@@ -208,7 +263,7 @@ fn is_lock_timeout(err: &str) -> bool {
 
 async fn vacuum_table(client: &Client, schema: &str, table: &str) -> Result<()> {
     // Table names originate from pg_catalog — quoting them is sufficient protection.
-    let sql = format!("VACUUM \"{}\".\"{}\"", schema, table);
+    let sql = format!("VACUUM (VERBOSE) \"{}\".\"{}\"", schema, table);
     client
         .execute(&sql, &[])
         .await
@@ -246,9 +301,13 @@ async fn freeze_table(client: &Client, schema: &str, table: &str) -> Result<()> 
 /// Returns `true` if the caller should proceed with the operation, `false` if
 /// the table should be skipped (recorded in `summary.skipped`).
 ///
+/// Autovacuum workers are always terminated unconditionally (no --force needed).
+/// Manual VACUUM sessions are only terminated if `force` is set; otherwise the
+/// table is skipped.
+///
 /// In dry-run mode nothing is terminated; the function only logs what would happen
-/// and still returns `true` when `force` is set (so dry-run prints the would-run
-/// message too) or `false` when the table would be skipped.
+/// and still returns `true` when actions would proceed or `false` when the table
+/// would be skipped.
 async fn handle_active_vacuums(
     client: &Client,
     schema: &str,
@@ -258,48 +317,90 @@ async fn handle_active_vacuums(
     logger: &Arc<Logger>,
     summary: &mut OperationSummary,
 ) -> Result<bool> {
-    let active_pids = find_active_vacuums(client, schema, table).await?;
-    if active_pids.is_empty() {
+    let active_sessions = find_active_vacuums(client, schema, table).await?;
+    if active_sessions.is_empty() {
         return Ok(true); // no conflict — proceed
     }
 
-    if force {
+    let autovacuum_pids: Vec<i32> = active_sessions
+        .iter()
+        .filter(|(_, backend_type)| backend_type == "autovacuum worker")
+        .map(|(pid, _)| *pid)
+        .collect();
+    let manual_pids: Vec<i32> = active_sessions
+        .iter()
+        .filter(|(_, backend_type)| backend_type != "autovacuum worker")
+        .map(|(pid, _)| *pid)
+        .collect();
+
+    // Always terminate autovacuum workers
+    if !autovacuum_pids.is_empty() {
         if dry_run {
             logger.log(
                 LogLevel::Warning,
                 &format!(
-                    "[DRY RUN] Would terminate {} active vacuum(s) on \"{}\".\"{}\" then proceed",
-                    active_pids.len(),
+                    "[DRY RUN] Would terminate {} autovacuum worker(s) on \"{}\".\"{}\" then proceed",
+                    autovacuum_pids.len(),
                     schema,
                     table
                 ),
             );
         } else {
-            terminate_backends(client, &active_pids).await?;
+            terminate_backends(client, &autovacuum_pids).await?;
             logger.log(
                 LogLevel::Warning,
                 &format!(
-                    "Terminated {} active vacuum(s) on \"{}\".\"{}\" (--force)",
-                    active_pids.len(),
+                    "Terminated {} autovacuum worker(s) on \"{}\".\"{}\"",
+                    autovacuum_pids.len(),
                     schema,
                     table
                 ),
             );
         }
-        Ok(true) // proceed (or print dry-run message)
+    }
+
+    // Manual VACUUM sessions gate on --force
+    if !manual_pids.is_empty() {
+        if force {
+            if dry_run {
+                logger.log(
+                    LogLevel::Warning,
+                    &format!(
+                        "[DRY RUN] Would terminate {} manual VACUUM session(s) on \"{}\".\"{}\" then proceed",
+                        manual_pids.len(),
+                        schema,
+                        table
+                    ),
+                );
+            } else {
+                terminate_backends(client, &manual_pids).await?;
+                logger.log(
+                    LogLevel::Warning,
+                    &format!(
+                        "Terminated {} manual VACUUM session(s) on \"{}\".\"{}\" (--force)",
+                        manual_pids.len(),
+                        schema,
+                        table
+                    ),
+                );
+            }
+            Ok(true) // proceed
+        } else {
+            logger.log(
+                LogLevel::Warning,
+                &format!(
+                    "Skipping \"{}\".\"{}\" — {} manual VACUUM session(s) running \
+                     (use --force to terminate and proceed)",
+                    schema,
+                    table,
+                    manual_pids.len()
+                ),
+            );
+            summary.skipped += 1;
+            Ok(false) // skip this table
+        }
     } else {
-        logger.log(
-            LogLevel::Warning,
-            &format!(
-                "Skipping \"{}\".\"{}\" — {} active vacuum(s) running \
-                 (use --force to terminate and proceed)",
-                schema,
-                table,
-                active_pids.len()
-            ),
-        );
-        summary.skipped += 1;
-        Ok(false) // skip this table
+        Ok(true) // autovacuum(s) terminated, no manual conflicts — proceed
     }
 }
 
@@ -322,6 +423,7 @@ pub async fn run_vacuum_never_vacuumed(
     force: bool,
     min_bytes: i64,
     max_bytes: i64,
+    limit: i64,
     logger: &Arc<Logger>,
 ) -> Result<OperationSummary> {
     logger.log(
@@ -329,7 +431,7 @@ pub async fn run_vacuum_never_vacuumed(
         "Searching for tables that have never been vacuumed...",
     );
 
-    let tables = find_never_vacuumed(client, schemas, table, min_bytes, max_bytes).await?;
+    let tables = find_never_vacuumed(client, schemas, table, min_bytes, max_bytes, limit).await?;
 
     let mut summary = OperationSummary::default();
     summary.total = tables.len();
@@ -412,6 +514,7 @@ pub async fn run_analyze_never_analyzed(
     force: bool,
     min_bytes: i64,
     max_bytes: i64,
+    limit: i64,
     logger: &Arc<Logger>,
 ) -> Result<OperationSummary> {
     logger.log(
@@ -419,7 +522,7 @@ pub async fn run_analyze_never_analyzed(
         "Searching for tables that have never been analyzed...",
     );
 
-    let tables = find_never_analyzed(client, schemas, table, min_bytes, max_bytes).await?;
+    let tables = find_never_analyzed(client, schemas, table, min_bytes, max_bytes, limit).await?;
 
     let mut summary = OperationSummary::default();
     summary.total = tables.len();
@@ -626,6 +729,7 @@ pub async fn run_bloat_vacuum(
     min_bytes: i64,
     max_bytes: i64,
     already_handled: &std::collections::HashSet<(String, String)>,
+    limit: i64,
     logger: &Arc<Logger>,
 ) -> Result<OperationSummary> {
     logger.log(
@@ -644,6 +748,7 @@ pub async fn run_bloat_vacuum(
         bloat_min_dead_tup,
         min_bytes,
         max_bytes,
+        limit,
     )
     .await?;
 
@@ -724,6 +829,127 @@ pub async fn run_bloat_vacuum(
                     summary.skipped += 1;
                 } else {
                     logger.log_table_failed(&t.schema_name, &t.table_name, OP_BLOAT, &reason);
+                    summary.failed += 1;
+                }
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Run ANALYZE on all tables with stale statistics.
+/// If `table` is Some, only that table is checked and (if eligible) analyzed.
+/// If `force` is true, active vacuums on the table are terminated before starting.
+/// Otherwise tables with an active manual VACUUM are skipped (autovacuum is always terminated).
+/// Tables already analyzed by earlier phases are skipped (tracked in `already_handled`).
+pub async fn run_stale_stats_analyze(
+    client: &Client,
+    schemas: &[String],
+    table: Option<&str>,
+    analyze_threshold: i64,
+    analyze_scale_factor: f64,
+    dry_run: bool,
+    force: bool,
+    min_bytes: i64,
+    max_bytes: i64,
+    already_handled: &std::collections::HashSet<(String, String)>,
+    limit: i64,
+    logger: &Arc<Logger>,
+) -> Result<OperationSummary> {
+    logger.log(
+        LogLevel::Info,
+        &format!(
+            "Searching for stale-stats candidates (modifications > {} + {:.2}% × live rows)...",
+            analyze_threshold, analyze_scale_factor * 100.0
+        ),
+    );
+
+    let tables = find_stale_stats_candidates(
+        client,
+        schemas,
+        table,
+        analyze_threshold,
+        analyze_scale_factor,
+        min_bytes,
+        max_bytes,
+        limit,
+    )
+    .await?;
+
+    let mut summary = OperationSummary::default();
+    summary.total = tables.len();
+
+    if tables.is_empty() {
+        logger.log(LogLevel::Success, "No stale-stats candidates found.");
+        return Ok(summary);
+    }
+
+    logger.log(
+        LogLevel::Info,
+        &format!("Found {} stale-stats candidate(s).", tables.len()),
+    );
+
+    for (i, t) in tables.iter().enumerate() {
+        if already_handled.contains(&(t.schema_name.clone(), t.table_name.clone())) {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "Skipping \"{}\".\"{}\" — already handled by an earlier phase",
+                    t.schema_name, t.table_name
+                ),
+            );
+            summary.skipped += 1;
+            continue;
+        }
+
+        let proceed = handle_active_vacuums(
+            client,
+            &t.schema_name,
+            &t.table_name,
+            force,
+            dry_run,
+            logger,
+            &mut summary,
+        )
+        .await?;
+
+        if !proceed {
+            continue;
+        }
+
+        if dry_run {
+            let effective_threshold = t.effective_threshold(analyze_threshold, analyze_scale_factor);
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "[DRY RUN] Would run: ANALYZE \"{}\".\"{}\"  (mods={}, threshold={})",
+                    t.schema_name, t.table_name, t.n_mod_since_analyze, effective_threshold
+                ),
+            );
+            continue;
+        }
+
+        logger.log_table_start(i + 1, tables.len(), &t.schema_name, &t.table_name, "ANALYZE (STALE STATS)");
+        let start = Instant::now();
+        match analyze_table(client, &t.schema_name, &t.table_name).await {
+            Ok(()) => {
+                logger.log_table_success(&t.schema_name, &t.table_name, "ANALYZE (STALE STATS)", start.elapsed());
+                summary.succeeded += 1;
+            }
+            Err(e) => {
+                let reason = e.to_string();
+                if is_lock_timeout(&reason) {
+                    logger.log(
+                        LogLevel::Warning,
+                        &format!(
+                            "Skipping \"{}\".\"{}\" — could not acquire lock within 10ms",
+                            t.schema_name, t.table_name
+                        ),
+                    );
+                    summary.skipped += 1;
+                } else {
+                    logger.log_table_failed(&t.schema_name, &t.table_name, "ANALYZE (STALE STATS)", &reason);
                     summary.failed += 1;
                 }
             }

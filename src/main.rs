@@ -66,21 +66,35 @@ struct Args {
     dry_run: bool,
 
     // ── Mode selection ───────────────────────────────────────────────────────
-    /// Comma-separated modes to run: vacuum,analyze,freeze,bloat.
-    /// Defaults to all four when omitted.
-    #[arg(long, value_delimiter = ',', help = "Modes to run: vacuum, analyze, freeze, bloat")]
+    /// Comma-separated modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats.
+    /// Defaults to all five when omitted.
+    #[arg(long, value_delimiter = ',', help = "Modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats")]
     mode: Option<Vec<String>>,
 
-    /// Terminate active vacuum/autovacuum on each table before maintaining it.
-    /// Without --force, tables with an active vacuum are skipped instead.
+    /// Terminate a conflicting manual VACUUM before starting (autovacuum workers are always terminated automatically).
     #[arg(long, default_value = "false")]
     force: bool,
+
+    /// Cap each mode to its top N candidate tables (default: no limit).
+    #[arg(long, help = "Limit each mode to top N tables (default: unlimited)")]
+    limit: Option<i64>,
 
     // ── Bloat tuning ─────────────────────────────────────────────────────────
     /// Bloat threshold percentage (default: 80.0). Tables with dead tuple ratio
     /// exceeding this percentage are considered bloat candidates.
     #[arg(long, default_value_t = DEFAULT_BLOAT_THRESHOLD_PCT)]
     bloat_threshold_pct: f64,
+
+    // ── Stale-stats tuning ───────────────────────────────────────────────────
+    /// Flat modification-count floor before a table is considered for re-analysis.
+    /// Defaults to the connected server's autovacuum_analyze_threshold if omitted.
+    #[arg(long, help = "Modification-count floor for stale-stats (default: read from server's autovacuum_analyze_threshold)")]
+    analyze_threshold: Option<i64>,
+
+    /// Scale factor applied to live row count when computing the re-analyze threshold.
+    /// Defaults to the connected server's autovacuum_analyze_scale_factor if omitted.
+    #[arg(long, help = "Scale factor for stale-stats (default: read from server's autovacuum_analyze_scale_factor)")]
+    analyze_scale_factor: Option<f64>,
 
     // ── Size filtering ───────────────────────────────────────────────────────
     /// Minimum table size in GB. Tables smaller than this are excluded.
@@ -162,7 +176,10 @@ struct Config {
     dry_run: Option<bool>,
     mode: Option<Vec<String>>,
     force: Option<bool>,
+    limit: Option<i64>,
     bloat_threshold_pct: Option<f64>,
+    analyze_threshold: Option<i64>,
+    analyze_scale_factor: Option<f64>,
     min_table_size_gb: Option<f64>,
     max_table_size_gb: Option<f64>,
     wraparound_min_age: Option<i64>,
@@ -216,10 +233,13 @@ fn merge_config(file: Config, mut args: Args) -> Args {
     if !args.dry_run { args.dry_run = file.dry_run.unwrap_or(false); }
     if args.mode.is_none() { args.mode = file.mode; }
     if !args.force { args.force = file.force.unwrap_or(false); }
+    if args.limit.is_none() { args.limit = file.limit; }
 
     if args.bloat_threshold_pct == DEFAULT_BLOAT_THRESHOLD_PCT {
         if let Some(v) = file.bloat_threshold_pct { args.bloat_threshold_pct = v; }
     }
+    if args.analyze_threshold.is_none() { args.analyze_threshold = file.analyze_threshold; }
+    if args.analyze_scale_factor.is_none() { args.analyze_scale_factor = file.analyze_scale_factor; }
     if args.min_table_size_gb.is_none() { args.min_table_size_gb = file.min_table_size_gb; }
     if args.max_table_size_gb.is_none() { args.max_table_size_gb = file.max_table_size_gb; }
 
@@ -293,11 +313,30 @@ async fn main() -> Result<()> {
         }
         modes
     } else {
-        [Mode::Vacuum, Mode::Analyze, Mode::Freeze, Mode::Bloat]
+        [Mode::NeverVacuumed, Mode::NeverAnalyzed, Mode::Wraparound, Mode::Bloated, Mode::StaleStats]
             .iter()
             .copied()
             .collect()
     };
+
+    // Validate --limit
+    if let Some(limit) = args.limit {
+        if limit <= 0 {
+            return Err(anyhow::anyhow!("--limit ({}) must be > 0", limit));
+        }
+    }
+
+    // Validate --analyze-threshold and --analyze-scale-factor
+    if let Some(threshold) = args.analyze_threshold {
+        if threshold < 0 {
+            return Err(anyhow::anyhow!("--analyze-threshold ({}) must be >= 0", threshold));
+        }
+    }
+    if let Some(factor) = args.analyze_scale_factor {
+        if factor < 0.0 {
+            return Err(anyhow::anyhow!("--analyze-scale-factor ({}) must be >= 0.0", factor));
+        }
+    }
 
     // Validate bloat_threshold_pct range
     if !(0.0..=100.0).contains(&args.bloat_threshold_pct) {
@@ -452,6 +491,42 @@ async fn main() -> Result<()> {
         .context("Failed to set lock_timeout")?;
     logger.log(LogLevel::Info, "lock_timeout set to 10ms for this session");
 
+    // Resolve --limit (default to no limit if not specified)
+    let limit_n = args.limit.unwrap_or(i64::MAX);
+
+    // Read autovacuum_analyze_threshold / autovacuum_analyze_scale_factor from the server;
+    // --analyze-threshold / --analyze-scale-factor override per-run if given.
+    let (server_analyze_threshold, server_analyze_scale_factor) =
+        match operations::get_analyze_settings(&client).await {
+            Ok(v) => v,
+            Err(e) => {
+                logger.log(
+                    LogLevel::Warning,
+                    &format!(
+                        "Could not read autovacuum_analyze settings from server, \
+                         falling back to defaults ({}, {}): {}",
+                        pg_maintainer::config::DEFAULT_ANALYZE_THRESHOLD,
+                        pg_maintainer::config::DEFAULT_ANALYZE_SCALE_FACTOR,
+                        e
+                    ),
+                );
+                (
+                    pg_maintainer::config::DEFAULT_ANALYZE_THRESHOLD,
+                    pg_maintainer::config::DEFAULT_ANALYZE_SCALE_FACTOR,
+                )
+            }
+        };
+    let effective_analyze_threshold = args.analyze_threshold.unwrap_or(server_analyze_threshold);
+    let effective_analyze_scale_factor = args.analyze_scale_factor.unwrap_or(server_analyze_scale_factor);
+    logger.log(
+        LogLevel::Info,
+        &format!(
+            "Stale-stats thresholds: analyze_threshold={} (server: {}), analyze_scale_factor={} (server: {})",
+            effective_analyze_threshold, server_analyze_threshold,
+            effective_analyze_scale_factor, server_analyze_scale_factor,
+        ),
+    );
+
     // Resolve schemas
     let schemas: Vec<String> = if args.discover_all_schemas && args.schema.is_none() {
         logger.log(LogLevel::Info, "Discovering all user schemas...");
@@ -522,12 +597,12 @@ async fn main() -> Result<()> {
     let mut already_handled: HashSet<(String, String)> = HashSet::new();
 
     // ── Phase 1: VACUUM never-vacuumed tables ─────────────────────────────────
-    let vacuum_summary = if enabled_modes.contains(&Mode::Vacuum) {
+    let vacuum_summary = if enabled_modes.contains(&Mode::NeverVacuumed) {
         logger.log(LogLevel::Info, "═══ Phase 1: VACUUM (never vacuumed) ═══");
-        let summary = operations::run_vacuum_never_vacuumed(&client, &schemas, table_filter, args.dry_run, args.force, min_bytes, max_bytes, &logger)
+        let summary = operations::run_vacuum_never_vacuumed(&client, &schemas, table_filter, args.dry_run, args.force, min_bytes, max_bytes, limit_n, &logger)
             .await
             .context("VACUUM phase failed")?;
-        for t in operations::find_never_vacuumed(&client, &schemas, table_filter, min_bytes, max_bytes).await.unwrap_or_default().iter() {
+        for t in operations::find_never_vacuumed(&client, &schemas, table_filter, min_bytes, max_bytes, limit_n).await.unwrap_or_default().iter() {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
         }
         summary
@@ -537,12 +612,12 @@ async fn main() -> Result<()> {
     };
 
     // ── Phase 2: ANALYZE never-analyzed tables ────────────────────────────────
-    let analyze_summary = if enabled_modes.contains(&Mode::Analyze) {
+    let analyze_summary = if enabled_modes.contains(&Mode::NeverAnalyzed) {
         logger.log(LogLevel::Info, "═══ Phase 2: ANALYZE (never analyzed) ═══");
-        let summary = operations::run_analyze_never_analyzed(&client, &schemas, table_filter, args.dry_run, args.force, min_bytes, max_bytes, &logger)
+        let summary = operations::run_analyze_never_analyzed(&client, &schemas, table_filter, args.dry_run, args.force, min_bytes, max_bytes, limit_n, &logger)
             .await
             .context("ANALYZE phase failed")?;
-        for t in operations::find_never_analyzed(&client, &schemas, table_filter, min_bytes, max_bytes).await.unwrap_or_default().iter() {
+        for t in operations::find_never_analyzed(&client, &schemas, table_filter, min_bytes, max_bytes, limit_n).await.unwrap_or_default().iter() {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
         }
         summary
@@ -552,7 +627,7 @@ async fn main() -> Result<()> {
     };
 
     // ── Phase 3: VACUUM FREEZE wraparound candidates ──────────────────────────
-    let freeze_summary = if enabled_modes.contains(&Mode::Freeze) {
+    let freeze_summary = if enabled_modes.contains(&Mode::Wraparound) {
         logger.log(
             LogLevel::Info,
             "═══ Phase 3: VACUUM FREEZE (wraparound candidates) ═══",
@@ -580,7 +655,7 @@ async fn main() -> Result<()> {
     };
 
     // ── Phase 4: VACUUM bloat candidates ─────────────────────────────────────
-    let bloat_summary = if enabled_modes.contains(&Mode::Bloat) {
+    let bloat_summary = if enabled_modes.contains(&Mode::Bloated) {
         logger.log(LogLevel::Info, "═══ Phase 4: VACUUM (bloat) ═══");
         operations::run_bloat_vacuum(
             &client,
@@ -593,6 +668,7 @@ async fn main() -> Result<()> {
             min_bytes,
             max_bytes,
             &already_handled,
+            limit_n,
             &logger,
         )
         .await
@@ -602,14 +678,38 @@ async fn main() -> Result<()> {
         Default::default()
     };
 
+    // ── Phase 5: ANALYZE stale-stats candidates ──────────────────────────────
+    let stale_stats_summary = if enabled_modes.contains(&Mode::StaleStats) {
+        logger.log(LogLevel::Info, "═══ Phase 5: ANALYZE (stale stats) ═══");
+        operations::run_stale_stats_analyze(
+            &client,
+            &schemas,
+            table_filter,
+            effective_analyze_threshold,
+            effective_analyze_scale_factor,
+            args.dry_run,
+            args.force,
+            min_bytes,
+            max_bytes,
+            &already_handled,
+            limit_n,
+            &logger,
+        )
+        .await
+        .context("ANALYZE STALE STATS phase failed")?
+    } else {
+        logger.log(LogLevel::Info, "Skipping Phase 5: ANALYZE (stale stats) (not in --mode)");
+        Default::default()
+    };
+
     // ── Final summary ─────────────────────────────────────────────────────────
     let elapsed = start.elapsed();
     let total_tables =
-        vacuum_summary.total + analyze_summary.total + freeze_summary.total + bloat_summary.total;
+        vacuum_summary.total + analyze_summary.total + freeze_summary.total + bloat_summary.total + stale_stats_summary.total;
     let total_ok =
-        vacuum_summary.succeeded + analyze_summary.succeeded + freeze_summary.succeeded + bloat_summary.succeeded;
+        vacuum_summary.succeeded + analyze_summary.succeeded + freeze_summary.succeeded + bloat_summary.succeeded + stale_stats_summary.succeeded;
     let total_fail =
-        vacuum_summary.failed + analyze_summary.failed + freeze_summary.failed + bloat_summary.failed;
+        vacuum_summary.failed + analyze_summary.failed + freeze_summary.failed + bloat_summary.failed + stale_stats_summary.failed;
 
     logger.log_always(
         LogLevel::Success,
@@ -620,7 +720,7 @@ async fn main() -> Result<()> {
         ),
     );
 
-    if enabled_modes.contains(&Mode::Vacuum) {
+    if enabled_modes.contains(&Mode::NeverVacuumed) {
         logger.log_always(
             LogLevel::Info,
             &format!(
@@ -629,7 +729,7 @@ async fn main() -> Result<()> {
             ),
         );
     }
-    if enabled_modes.contains(&Mode::Analyze) {
+    if enabled_modes.contains(&Mode::NeverAnalyzed) {
         logger.log_always(
             LogLevel::Info,
             &format!(
@@ -638,7 +738,7 @@ async fn main() -> Result<()> {
             ),
         );
     }
-    if enabled_modes.contains(&Mode::Freeze) {
+    if enabled_modes.contains(&Mode::Wraparound) {
         logger.log_always(
             LogLevel::Info,
             &format!(
@@ -647,12 +747,21 @@ async fn main() -> Result<()> {
             ),
         );
     }
-    if enabled_modes.contains(&Mode::Bloat) {
+    if enabled_modes.contains(&Mode::Bloated) {
         logger.log_always(
             LogLevel::Info,
             &format!(
                 "  VACUUM (bloat) — total: {}, ok: {}, failed: {}, skipped: {}",
                 bloat_summary.total, bloat_summary.succeeded, bloat_summary.failed, bloat_summary.skipped
+            ),
+        );
+    }
+    if enabled_modes.contains(&Mode::StaleStats) {
+        logger.log_always(
+            LogLevel::Info,
+            &format!(
+                "  ANALYZE (stats) — total: {}, ok: {}, failed: {}, skipped: {}",
+                stale_stats_summary.total, stale_stats_summary.succeeded, stale_stats_summary.failed, stale_stats_summary.skipped
             ),
         );
     }

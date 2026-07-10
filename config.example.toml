@@ -18,12 +18,20 @@ discover-all-schemas = false       # set true to maintain every user schema
 
 # ── Maintenance modes ────────────────────────────────────────────────────────
 dry-run = false              # show commands without executing them
-force   = false              # terminate active vacuums before starting
-# mode  = "vacuum,analyze,freeze,bloat"  # comma-separated modes to run
-                             # default (omitted): all four modes
+limit   = 100                # cap each mode to top N tables (optional, default: unlimited)
+force   = false              # terminate conflicting manual VACUUM sessions; autovacuum is always terminated
+# mode  = "never-vacuumed,never-analyzed,wraparound,bloated,stale-stats"
+                             # comma-separated modes to run
+                             # default (omitted): all five modes
 
-# ── Bloat detection (Phase 4) ─────────────────────────────────────────────────
+# ── Bloat detection (bloated mode) ────────────────────────────────────────────
 bloat-threshold-pct = 80.0   # flag tables with > this % dead tuples
+
+# ── Stale-stats tuning (stale-stats mode) ────────────────────────────────────
+# analyze-threshold = 50      # modification-count floor for re-analysis
+                              # (default: read from server's autovacuum_analyze_threshold)
+# analyze-scale-factor = 0.1  # scale factor for live row count
+                              # (default: read from server's autovacuum_analyze_scale_factor)
 
 # ── Table size filtering (applies to all modes) ───────────────────────────────
 # min-table-size-gb = 0.1    # exclude tables smaller than this

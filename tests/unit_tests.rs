@@ -202,18 +202,19 @@ fn test_find_wraparound_candidates_table_uses_any_cast() {
 
 #[test]
 fn test_mode_from_str_all_variants() {
-    assert_eq!("vacuum".parse::<Mode>().unwrap(), Mode::Vacuum);
-    assert_eq!("analyze".parse::<Mode>().unwrap(), Mode::Analyze);
-    assert_eq!("freeze".parse::<Mode>().unwrap(), Mode::Freeze);
-    assert_eq!("bloat".parse::<Mode>().unwrap(), Mode::Bloat);
+    assert_eq!("never-vacuumed".parse::<Mode>().unwrap(), Mode::NeverVacuumed);
+    assert_eq!("never-analyzed".parse::<Mode>().unwrap(), Mode::NeverAnalyzed);
+    assert_eq!("wraparound".parse::<Mode>().unwrap(), Mode::Wraparound);
+    assert_eq!("bloated".parse::<Mode>().unwrap(), Mode::Bloated);
+    assert_eq!("stale-stats".parse::<Mode>().unwrap(), Mode::StaleStats);
 }
 
 #[test]
 fn test_mode_from_str_case_insensitive() {
-    assert_eq!("VACUUM".parse::<Mode>().unwrap(), Mode::Vacuum);
-    assert_eq!("Analyze".parse::<Mode>().unwrap(), Mode::Analyze);
-    assert_eq!("FREEZE".parse::<Mode>().unwrap(), Mode::Freeze);
-    assert_eq!("Bloat".parse::<Mode>().unwrap(), Mode::Bloat);
+    assert_eq!("NEVER-VACUUMED".parse::<Mode>().unwrap(), Mode::NeverVacuumed);
+    assert_eq!("Never-Analyzed".parse::<Mode>().unwrap(), Mode::NeverAnalyzed);
+    assert_eq!("WRAPAROUND".parse::<Mode>().unwrap(), Mode::Wraparound);
+    assert_eq!("Bloated".parse::<Mode>().unwrap(), Mode::Bloated);
 }
 
 #[test]
@@ -221,14 +222,16 @@ fn test_mode_from_str_invalid() {
     assert!("invalid".parse::<Mode>().is_err());
     assert!("".parse::<Mode>().is_err());
     assert!("vac".parse::<Mode>().is_err());
+    assert!("vacuum".parse::<Mode>().is_err()); // old names no longer accepted
 }
 
 #[test]
 fn test_mode_display() {
-    assert_eq!(Mode::Vacuum.to_string(), "vacuum");
-    assert_eq!(Mode::Analyze.to_string(), "analyze");
-    assert_eq!(Mode::Freeze.to_string(), "freeze");
-    assert_eq!(Mode::Bloat.to_string(), "bloat");
+    assert_eq!(Mode::NeverVacuumed.to_string(), "never-vacuumed");
+    assert_eq!(Mode::NeverAnalyzed.to_string(), "never-analyzed");
+    assert_eq!(Mode::Wraparound.to_string(), "wraparound");
+    assert_eq!(Mode::Bloated.to_string(), "bloated");
+    assert_eq!(Mode::StaleStats.to_string(), "stale-stats");
 }
 
 // ── BloatTableInfo ────────────────────────────────────────────────────────────

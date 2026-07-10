@@ -112,19 +112,21 @@ pub struct OperationSummary {
 /// Maintenance mode: which phase(s) to execute.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
-    Vacuum,
-    Analyze,
-    Freeze,
-    Bloat,
+    NeverVacuumed,
+    NeverAnalyzed,
+    Wraparound,
+    Bloated,
+    StaleStats,
 }
 
 impl std::fmt::Display for Mode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Mode::Vacuum => write!(f, "vacuum"),
-            Mode::Analyze => write!(f, "analyze"),
-            Mode::Freeze => write!(f, "freeze"),
-            Mode::Bloat => write!(f, "bloat"),
+            Mode::NeverVacuumed => write!(f, "never-vacuumed"),
+            Mode::NeverAnalyzed => write!(f, "never-analyzed"),
+            Mode::Wraparound => write!(f, "wraparound"),
+            Mode::Bloated => write!(f, "bloated"),
+            Mode::StaleStats => write!(f, "stale-stats"),
         }
     }
 }
@@ -134,12 +136,13 @@ impl std::str::FromStr for Mode {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "vacuum" => Ok(Mode::Vacuum),
-            "analyze" => Ok(Mode::Analyze),
-            "freeze" => Ok(Mode::Freeze),
-            "bloat" => Ok(Mode::Bloat),
+            "never-vacuumed" => Ok(Mode::NeverVacuumed),
+            "never-analyzed" => Ok(Mode::NeverAnalyzed),
+            "wraparound" => Ok(Mode::Wraparound),
+            "bloated" => Ok(Mode::Bloated),
+            "stale-stats" => Ok(Mode::StaleStats),
             _ => Err(format!(
-                "Invalid mode '{}'. Must be one of: vacuum, analyze, freeze, bloat",
+                "Invalid mode '{}'. Must be one of: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats",
                 s
             )),
         }
@@ -165,5 +168,25 @@ impl BloatTableInfo {
             return 0.0;
         }
         (self.n_dead_tup as f64 / total as f64) * 100.0
+    }
+}
+
+/// A table that is a candidate for re-analysis because enough rows have changed
+/// since the last analyze that planner statistics are likely stale.
+#[derive(Debug, Clone)]
+pub struct StaleStatsTableInfo {
+    pub schema_name: String,
+    pub table_name: String,
+    /// Estimated live row count from pg_stat_user_tables
+    pub n_live_tup: i64,
+    /// Rows inserted/updated/deleted since the last ANALYZE (manual or auto)
+    pub n_mod_since_analyze: i64,
+}
+
+impl StaleStatsTableInfo {
+    /// The absolute modification-count threshold that was crossed, given the
+    /// configured flat floor and scale factor.
+    pub fn effective_threshold(&self, analyze_threshold: i64, analyze_scale_factor: f64) -> i64 {
+        analyze_threshold + (analyze_scale_factor * self.n_live_tup as f64).round() as i64
     }
 }

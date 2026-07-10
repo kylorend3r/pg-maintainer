@@ -1,6 +1,6 @@
 # pg-maintainer
 
-A single-threaded PostgreSQL table maintenance tool written in Rust. It runs four sequential maintenance modes against one or more schemas, targeting only the tables that actually need work.
+A single-threaded PostgreSQL table maintenance tool written in Rust. It runs five sequential maintenance phases against one or more schemas, targeting only the tables that actually need work. **Requires PostgreSQL 14+.**
 
 ## Why pg-maintainer?
 
@@ -34,14 +34,15 @@ A single-threaded PostgreSQL table maintenance tool written in Rust. It runs fou
 
 ## Maintenance Modes
 
-| # | Operation | Targets |
-|---|---|---|
-| 1 | `VACUUM` | Tables where neither manual nor autovacuum has ever run |
-| 2 | `ANALYZE` | Tables where neither manual nor autoanalyze has ever run |
-| 3 | `VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE)` | Tables whose XID age exceeds the wraparound threshold |
-| 4 | `VACUUM (VERBOSE)` | Tables with excessive dead tuples (bloat > threshold, default 80%) |
+| # | Mode | Operation | Targets |
+|---|---|---|---|
+| 1 | `never-vacuumed` | `VACUUM (VERBOSE)` | Tables where neither manual nor autovacuum has ever run |
+| 2 | `never-analyzed` | `ANALYZE` | Tables where neither manual nor autoanalyze has ever run |
+| 3 | `wraparound` | `VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE)` | Tables whose XID age exceeds the wraparound threshold |
+| 4 | `bloated` | `VACUUM (VERBOSE)` | Tables with excessive dead tuples (bloat > threshold, default 80%) |
+| 5 | `stale-stats` | `ANALYZE` | Tables where modifications since last analyze exceed configured threshold |
 
-All four modes run in sequence on a single connection. Select individual modes with `--mode` (default: all four). A table matched by an earlier mode in the same run is not reprocessed by a later mode.
+All five modes run in sequence on a single connection. Partitioned parent tables (declarative partitioning) are automatically excluded from discovery — their partitions are maintained individually. Select individual modes with `--mode` (default: all five). A table matched by an earlier mode in the same run is not reprocessed by a later mode.
 
 ## Installation
 
@@ -63,7 +64,7 @@ docker build -t pg-maintainer:latest .
 docker run --rm \
   -e PG_HOST=db.internal -e PG_PORT=5432 -e PG_DATABASE=mydb \
   -e PG_USER=maintainer -e PG_PASSWORD=secret \
-  pg-maintainer:latest --discover-all-schemas --mode vacuum,analyze
+  pg-maintainer:latest --discover-all-schemas --mode never-vacuumed,never-analyzed
 
 # Use a secret file for the password (recommended)
 docker run --rm \
@@ -92,7 +93,7 @@ spec:
     args:
     - --discover-all-schemas
     - --mode
-    - vacuum,analyze,freeze
+    - never-vacuumed,never-analyzed,wraparound
   volumes:
   - name: pg-secret
     secret:
@@ -118,11 +119,17 @@ pg-maintainer -d mydb -s public -t users
 # Dry run — print commands without executing them
 pg-maintainer -d mydb -s public --dry-run
 
-# Run only vacuum and bloat modes
-pg-maintainer -d mydb -s public --mode vacuum,bloat
+# Run only never-vacuumed and bloated modes
+pg-maintainer -d mydb -s public --mode never-vacuumed,bloated
 
 # Detect bloat with custom threshold (70% instead of 80%)
-pg-maintainer -d mydb -s public --mode bloat --bloat-threshold-pct 70
+pg-maintainer -d mydb -s public --mode bloated --bloat-threshold-pct 70
+
+# Limit each mode to top 5 tables by severity
+pg-maintainer -d mydb -s public --limit 5
+
+# Run stale-stats mode with custom analyze threshold
+pg-maintainer -d mydb -s public --mode stale-stats --analyze-threshold 100
 
 # Filter tables by size
 pg-maintainer -d mydb -s public --min-table-size-gb 0.5 --max-table-size-gb 10
@@ -176,12 +183,15 @@ Overall configuration precedence: CLI arguments → TOML config file (`-C`) → 
 | Flag | Description |
 |---|---|
 | `-f, --dry-run` | Print commands without executing them |
-| `--mode` | Comma-separated modes to run: `vacuum`, `analyze`, `freeze`, `bloat` (default: all four) |
-| `--force` | Terminate active vacuums before starting (useful with `--mode freeze`) |
-| `--bloat-threshold-pct` | Bloat percentage threshold for Phase 4 (default: `80.0`) |
+| `--mode` | Comma-separated modes: `never-vacuumed`, `never-analyzed`, `wraparound`, `bloated`, `stale-stats` (default: all five) |
+| `--limit` | Cap each mode to top N tables (default: unlimited) |
+| `--force` | Terminate conflicting manual VACUUM sessions before starting; autovacuum workers are always terminated |
+| `--bloat-threshold-pct` | Bloat percentage threshold for `bloated` mode (default: `80.0`) |
+| `--analyze-threshold` | Modification-count floor for `stale-stats` mode (default: read from server's `autovacuum_analyze_threshold`) |
+| `--analyze-scale-factor` | Scale factor for `stale-stats` mode (default: read from server's `autovacuum_analyze_scale_factor`) |
 | `--min-table-size-gb` | Exclude tables smaller than this; all modes (default: `0`, no floor) |
 | `--max-table-size-gb` | Exclude tables larger than this; all modes (default: none, no ceiling) |
-| `--wraparound-min-age` | XID age threshold for Phase 3 (default: `200000000`) |
+| `--wraparound-min-age` | XID age threshold for `wraparound` mode (default: `200000000`) |
 | `--wraparound-pct` | Wraparound threshold as % of `autovacuum_freeze_max_age`; overrides `--wraparound-min-age` |
 | `-w, --maintenance-work-mem-gb` | Session `maintenance_work_mem` in GB (default: `1`, max: `32`) |
 

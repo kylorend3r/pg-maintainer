@@ -16,3 +16,12 @@ pub const DEFAULT_WRAPAROUND_MIN_AGE: i64 = 200_000_000;
 // Bloat detection thresholds
 pub const DEFAULT_BLOAT_THRESHOLD_PCT: f64 = 80.0;
 pub const DEFAULT_BLOAT_MIN_DEAD_TUP: i64 = 1000;
+
+// Stale-stats (re-analyze) thresholds — defaults match PostgreSQL's autovacuum GUCs
+pub const DEFAULT_ANALYZE_THRESHOLD: i64 = 50;
+pub const DEFAULT_ANALYZE_SCALE_FACTOR: f64 = 0.1;
+
+// Minimum supported PostgreSQL server version
+// idle_session_timeout (set unconditionally in connection::connect()) requires PostgreSQL 14+
+pub const MIN_SUPPORTED_PG_VERSION_NUM: i32 = 140000;
+pub const MIN_SUPPORTED_PG_VERSION_LABEL: &str = "PostgreSQL 14";

@@ -142,6 +142,24 @@ fn escape_libpq_value(s: &str) -> String {
     }
 }
 
+/// Returns the server's numeric version (server_version_num), e.g. 160003 for 16.3.
+pub async fn get_server_version_num(client: &tokio_postgres::Client) -> Result<i32> {
+    let row = client
+        .query_one("SELECT current_setting('server_version_num')::int", &[])
+        .await
+        .context("Failed to read server_version_num")?;
+    Ok(row.get(0))
+}
+
+/// Formats a server_version_num for display, e.g. 160003 -> "16.3", 90605 -> "9.6.5".
+fn format_pg_version(version_num: i32) -> String {
+    if version_num >= 100000 {
+        format!("{}.{}", version_num / 10000, version_num % 10000)
+    } else {
+        format!("{}.{}.{}", version_num / 10000, (version_num / 100) % 100, version_num % 100)
+    }
+}
+
 /// Open a connection with optional SSL, then set basic session parameters.
 pub async fn connect(
     connection_string: &str,
@@ -158,6 +176,18 @@ pub async fn connect(
         ssl_client_key,
     )
     .await?;
+
+    // Check minimum PostgreSQL version before setting session parameters
+    let version_num = get_server_version_num(&client).await?;
+    if version_num < crate::config::MIN_SUPPORTED_PG_VERSION_NUM {
+        return Err(anyhow::anyhow!(
+            "pg-maintainer requires {}+ — connected server reports {}. \
+             Session settings this tool depends on (e.g. idle_session_timeout) \
+             were introduced in PostgreSQL 14; older servers are not supported.",
+            crate::config::MIN_SUPPORTED_PG_VERSION_LABEL,
+            format_pg_version(version_num),
+        ));
+    }
 
     client
         .execute(crate::queries::SET_STATEMENT_TIMEOUT, &[])
