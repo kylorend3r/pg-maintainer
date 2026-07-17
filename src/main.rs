@@ -650,6 +650,21 @@ async fn main() -> Result<()> {
         ),
     );
 
+    // Create logbook schema and tables (best-effort; failure doesn't abort maintenance)
+    match pg_maintainer::schema::ensure_logbook_schema(&client).await {
+        Ok(created) => {
+            if created {
+                logger.log(LogLevel::Info, "Created maintainer_logbook schema");
+            }
+        }
+        Err(e) => {
+            logger.log(
+                LogLevel::Warning,
+                &format!("Could not set up logbook schema: {e} — maintenance will continue without logging"),
+            );
+        }
+    }
+
     // Set maintenance_work_mem
     connection::set_maintenance_work_mem(&client, args.maintenance_work_mem_gb)
         .await
