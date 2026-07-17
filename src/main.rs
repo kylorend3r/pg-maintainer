@@ -798,9 +798,11 @@ async fn main() -> Result<()> {
             args.skip_active_vacuum,
             &logger,
             &mut shutdown_rx,
-            args.vacuum_truncate,
-            args.vacuum_disable_page_skipping,
-            args.vacuum_skip_locked,
+            pg_maintainer::types::VacuumOptions {
+                truncate: args.vacuum_truncate,
+                disable_page_skipping: args.vacuum_disable_page_skipping,
+                skip_locked: args.vacuum_skip_locked,
+            },
         )
         .await
         .context("VACUUM phase failed")?
@@ -873,9 +875,11 @@ async fn main() -> Result<()> {
             args.skip_active_vacuum,
             &logger,
             &mut shutdown_rx,
-            args.vacuum_truncate,
-            args.vacuum_disable_page_skipping,
-            args.vacuum_skip_locked,
+            pg_maintainer::types::VacuumOptions {
+                truncate: args.vacuum_truncate,
+                disable_page_skipping: args.vacuum_disable_page_skipping,
+                skip_locked: args.vacuum_skip_locked,
+            },
         )
         .await
         .context("VACUUM FREEZE phase failed")?
@@ -918,9 +922,11 @@ async fn main() -> Result<()> {
             &already_handled,
             &logger,
             &mut shutdown_rx,
-            args.vacuum_truncate,
-            args.vacuum_disable_page_skipping,
-            args.vacuum_skip_locked,
+            pg_maintainer::types::VacuumOptions {
+                truncate: args.vacuum_truncate,
+                disable_page_skipping: args.vacuum_disable_page_skipping,
+                skip_locked: args.vacuum_skip_locked,
+            },
         )
         .await
         .context("VACUUM BLOAT phase failed")?;

@@ -1,6 +1,6 @@
 use crate::logging::{LogContext, LogLevel, Logger};
 use crate::queries;
-use crate::types::{BloatTableInfo, FreezeTableInfo, OperationSummary, TableInfo};
+use crate::types::{BloatTableInfo, FreezeTableInfo, OperationSummary, TableInfo, VacuumOptions};
 use crate::vacuum_output;
 use anyhow::Result;
 use std::sync::Arc;
@@ -13,6 +13,19 @@ use tokio_postgres::error::SqlState;
 struct OperationResult {
     dead_tuples_before: Option<i64>,
     dead_tuples_removed: Option<i64>,
+}
+
+/// Log entry details for a maintenance operation.
+struct LogEntry<'a> {
+    schema: &'a str,
+    table: &'a str,
+    operation: &'a str,
+    mode: &'a str,
+    status: &'a str,
+    dead_tuples_before: Option<i64>,
+    dead_tuples_removed: Option<i64>,
+    duration_ms: i64,
+    error_message: Option<&'a str>,
 }
 
 // ─── Concurrency guard ────────────────────────────────────────────────────────
@@ -55,37 +68,29 @@ pub async fn try_acquire_schema_lock(client: &Client, schemas: &[String]) -> Res
 // ─── Logging to maintenance logbook ──────────────────────────────────────────────
 
 /// Insert a maintenance operation log entry (only if not dry_run).
-/// Returns Ok(()) on success, silently continues on error.
-async fn log_maintenance_operation(
-    client: &Client,
-    dry_run: bool,
-    schema: &str,
-    table: &str,
-    operation: &str,
-    mode: &str,
-    status: &str,
-    dead_tuples_before: Option<i64>,
-    dead_tuples_removed: Option<i64>,
-    duration_ms: i64,
-    error_message: Option<&str>,
-) {
+/// Logging failures are silently ignored to prevent operation failures.
+async fn log_maintenance_operation(client: &Client, dry_run: bool, entry: LogEntry<'_>) {
     if dry_run {
         return; // Don't log during dry-run
     }
 
     let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[
-        &schema,
-        &table,
-        &operation,
-        &mode,
-        &status,
-        &dead_tuples_before,
-        &dead_tuples_removed,
-        &duration_ms,
-        &error_message,
+        &entry.schema,
+        &entry.table,
+        &entry.operation,
+        &entry.mode,
+        &entry.status,
+        &entry.dead_tuples_before,
+        &entry.dead_tuples_removed,
+        &entry.duration_ms,
+        &entry.error_message,
     ];
 
-    if let Err(_) = client.execute(queries::INSERT_MAINTENANCE_LOG, params).await {
+    if client
+        .execute(queries::INSERT_MAINTENANCE_LOG, params)
+        .await
+        .is_err()
+    {
         // Silently ignore logging errors — they should not fail maintenance operations
     }
 }
@@ -410,9 +415,7 @@ async fn vacuum_table(
     client: &Client,
     schema: &str,
     table: &str,
-    truncate: bool,
-    disable_page_skipping: bool,
-    skip_locked: bool,
+    vacuum_opts: VacuumOptions,
 ) -> Result<OperationResult, tokio_postgres::Error> {
     // Get dead tuple count before VACUUM
     let dead_before: i64 = client
@@ -421,13 +424,13 @@ async fn vacuum_table(
         .get(0);
 
     let mut opts = vec!["VERBOSE".to_string()];
-    if !truncate {
+    if !vacuum_opts.truncate {
         opts.push("TRUNCATE FALSE".to_string());
     }
-    if disable_page_skipping {
+    if vacuum_opts.disable_page_skipping {
         opts.push("DISABLE_PAGE_SKIPPING".to_string());
     }
-    if skip_locked {
+    if vacuum_opts.skip_locked {
         opts.push("SKIP_LOCKED".to_string());
     }
     let sql = format!(
@@ -472,20 +475,18 @@ async fn freeze_table(
     client: &Client,
     schema: &str,
     table: &str,
-    truncate: bool,
-    disable_page_skipping: bool,
-    skip_locked: bool,
+    vacuum_opts: VacuumOptions,
 ) -> Result<OperationResult, tokio_postgres::Error> {
     // INDEX_CLEANUP FALSE avoids index bloat during aggressive freeze passes.
     // VERBOSE surfaces progress notices to the PostgreSQL log.
     let mut opts = vec!["VERBOSE".to_string(), "FREEZE".to_string(), "INDEX_CLEANUP FALSE".to_string()];
-    if !truncate {
+    if !vacuum_opts.truncate {
         opts.push("TRUNCATE FALSE".to_string());
     }
-    if disable_page_skipping {
+    if vacuum_opts.disable_page_skipping {
         opts.push("DISABLE_PAGE_SKIPPING".to_string());
     }
-    if skip_locked {
+    if vacuum_opts.skip_locked {
         opts.push("SKIP_LOCKED".to_string());
     }
     let sql = format!(
@@ -646,9 +647,7 @@ pub async fn run_vacuum_never_vacuumed(
     skip_active_vacuum: bool,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
-    vacuum_truncate: bool,
-    vacuum_disable_page_skipping: bool,
-    vacuum_skip_locked: bool,
+    vacuum_opts: VacuumOptions,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary {
         total: tables.len(),
@@ -713,9 +712,7 @@ pub async fn run_vacuum_never_vacuumed(
             client,
             &t.schema_name,
             &t.table_name,
-            vacuum_truncate,
-            vacuum_disable_page_skipping,
-            vacuum_skip_locked,
+            vacuum_opts,
         )
         .await
         {
@@ -739,15 +736,17 @@ pub async fn run_vacuum_never_vacuumed(
                 log_maintenance_operation(
                     client,
                     dry_run,
-                    &t.schema_name,
-                    &t.table_name,
-                    "VACUUM",
-                    "never-vacuumed",
-                    "success",
-                    result.dead_tuples_before,
-                    result.dead_tuples_removed,
-                    duration_ms,
-                    None,
+                    LogEntry {
+                        schema: &t.schema_name,
+                        table: &t.table_name,
+                        operation: "VACUUM",
+                        mode: "never-vacuumed",
+                        status: "success",
+                        dead_tuples_before: result.dead_tuples_before,
+                        dead_tuples_removed: result.dead_tuples_removed,
+                        duration_ms,
+                        error_message: None,
+                    },
                 )
                 .await;
                 summary.succeeded += 1;
@@ -773,15 +772,17 @@ pub async fn run_vacuum_never_vacuumed(
                     log_maintenance_operation(
                         client,
                         dry_run,
-                        &t.schema_name,
-                        &t.table_name,
-                        "VACUUM",
-                        "never-vacuumed",
-                        "error",
-                        None,
-                        None,
-                        duration_ms,
-                        Some(&e.to_string()),
+                        LogEntry {
+                            schema: &t.schema_name,
+                            table: &t.table_name,
+                            operation: "VACUUM",
+                            mode: "never-vacuumed",
+                            status: "error",
+                            dead_tuples_before: None,
+                            dead_tuples_removed: None,
+                            duration_ms,
+                            error_message: Some(&e.to_string()),
+                        },
                     )
                     .await;
                     summary.failed += 1;
@@ -877,15 +878,17 @@ pub async fn run_analyze_never_analyzed(
                 log_maintenance_operation(
                     client,
                     dry_run,
-                    &t.schema_name,
-                    &t.table_name,
-                    "ANALYZE",
-                    "never-analyzed",
-                    "success",
-                    result.dead_tuples_before,
-                    result.dead_tuples_removed,
-                    duration_ms,
-                    None,
+                    LogEntry {
+                        schema: &t.schema_name,
+                        table: &t.table_name,
+                        operation: "ANALYZE",
+                        mode: "never-analyzed",
+                        status: "success",
+                        dead_tuples_before: result.dead_tuples_before,
+                        dead_tuples_removed: result.dead_tuples_removed,
+                        duration_ms,
+                        error_message: None,
+                    },
                 )
                 .await;
                 summary.succeeded += 1;
@@ -911,15 +914,17 @@ pub async fn run_analyze_never_analyzed(
                     log_maintenance_operation(
                         client,
                         dry_run,
-                        &t.schema_name,
-                        &t.table_name,
-                        "ANALYZE",
-                        "never-analyzed",
-                        "error",
-                        None,
-                        None,
-                        duration_ms,
-                        Some(&e.to_string()),
+                        LogEntry {
+                            schema: &t.schema_name,
+                            table: &t.table_name,
+                            operation: "ANALYZE",
+                            mode: "never-analyzed",
+                            status: "error",
+                            dead_tuples_before: None,
+                            dead_tuples_removed: None,
+                            duration_ms,
+                            error_message: Some(&e.to_string()),
+                        },
                     )
                     .await;
                     summary.failed += 1;
@@ -942,9 +947,7 @@ pub async fn run_freeze_wraparound(
     skip_active_vacuum: bool,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
-    vacuum_truncate: bool,
-    vacuum_disable_page_skipping: bool,
-    vacuum_skip_locked: bool,
+    vacuum_opts: VacuumOptions,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary {
         total: tables.len(),
@@ -1035,9 +1038,7 @@ pub async fn run_freeze_wraparound(
             client,
             &t.schema_name,
             &t.table_name,
-            vacuum_truncate,
-            vacuum_disable_page_skipping,
-            vacuum_skip_locked,
+            vacuum_opts,
         )
         .await
         {
@@ -1047,15 +1048,17 @@ pub async fn run_freeze_wraparound(
                 log_maintenance_operation(
                     client,
                     dry_run,
-                    &t.schema_name,
-                    &t.table_name,
-                    "FREEZE",
-                    "wraparound",
-                    "success",
-                    result.dead_tuples_before,
-                    result.dead_tuples_removed,
-                    duration_ms,
-                    None,
+                    LogEntry {
+                        schema: &t.schema_name,
+                        table: &t.table_name,
+                        operation: "FREEZE",
+                        mode: "wraparound",
+                        status: "success",
+                        dead_tuples_before: result.dead_tuples_before,
+                        dead_tuples_removed: result.dead_tuples_removed,
+                        duration_ms,
+                        error_message: None,
+                    },
                 )
                 .await;
                 summary.succeeded += 1;
@@ -1081,15 +1084,17 @@ pub async fn run_freeze_wraparound(
                     log_maintenance_operation(
                         client,
                         dry_run,
-                        &t.schema_name,
-                        &t.table_name,
-                        "FREEZE",
-                        "wraparound",
-                        "error",
-                        None,
-                        None,
-                        duration_ms,
-                        Some(&e.to_string()),
+                        LogEntry {
+                            schema: &t.schema_name,
+                            table: &t.table_name,
+                            operation: "FREEZE",
+                            mode: "wraparound",
+                            status: "error",
+                            dead_tuples_before: None,
+                            dead_tuples_removed: None,
+                            duration_ms,
+                            error_message: Some(&e.to_string()),
+                        },
                     )
                     .await;
                     summary.failed += 1;
@@ -1115,9 +1120,7 @@ pub async fn run_bloat_vacuum(
     already_handled: &std::collections::HashSet<(String, String)>,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
-    vacuum_truncate: bool,
-    vacuum_disable_page_skipping: bool,
-    vacuum_skip_locked: bool,
+    vacuum_opts: VacuumOptions,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary {
         total: tables.len(),
@@ -1194,9 +1197,7 @@ pub async fn run_bloat_vacuum(
             client,
             &t.schema_name,
             &t.table_name,
-            vacuum_truncate,
-            vacuum_disable_page_skipping,
-            vacuum_skip_locked,
+            vacuum_opts,
         )
         .await
         {
@@ -1220,15 +1221,17 @@ pub async fn run_bloat_vacuum(
                 log_maintenance_operation(
                     client,
                     dry_run,
-                    &t.schema_name,
-                    &t.table_name,
-                    "VACUUM",
-                    "bloated",
-                    "success",
-                    result.dead_tuples_before,
-                    result.dead_tuples_removed,
-                    duration_ms,
-                    None,
+                    LogEntry {
+                        schema: &t.schema_name,
+                        table: &t.table_name,
+                        operation: "VACUUM",
+                        mode: "bloated",
+                        status: "success",
+                        dead_tuples_before: result.dead_tuples_before,
+                        dead_tuples_removed: result.dead_tuples_removed,
+                        duration_ms,
+                        error_message: None,
+                    },
                 )
                 .await;
                 summary.succeeded += 1;
@@ -1254,15 +1257,17 @@ pub async fn run_bloat_vacuum(
                     log_maintenance_operation(
                         client,
                         dry_run,
-                        &t.schema_name,
-                        &t.table_name,
-                        "VACUUM",
-                        "bloated",
-                        "error",
-                        None,
-                        None,
-                        duration_ms,
-                        Some(&e.to_string()),
+                        LogEntry {
+                            schema: &t.schema_name,
+                            table: &t.table_name,
+                            operation: "VACUUM",
+                            mode: "bloated",
+                            status: "error",
+                            dead_tuples_before: None,
+                            dead_tuples_removed: None,
+                            duration_ms,
+                            error_message: Some(&e.to_string()),
+                        },
                     )
                     .await;
                     summary.failed += 1;
@@ -1378,15 +1383,17 @@ pub async fn run_stale_stats_analyze(
                 log_maintenance_operation(
                     client,
                     dry_run,
-                    &t.schema_name,
-                    &t.table_name,
-                    "ANALYZE",
-                    "stale-stats",
-                    "success",
-                    result.dead_tuples_before,
-                    result.dead_tuples_removed,
-                    duration_ms,
-                    None,
+                    LogEntry {
+                        schema: &t.schema_name,
+                        table: &t.table_name,
+                        operation: "ANALYZE",
+                        mode: "stale-stats",
+                        status: "success",
+                        dead_tuples_before: result.dead_tuples_before,
+                        dead_tuples_removed: result.dead_tuples_removed,
+                        duration_ms,
+                        error_message: None,
+                    },
                 )
                 .await;
                 summary.succeeded += 1;
@@ -1412,15 +1419,17 @@ pub async fn run_stale_stats_analyze(
                     log_maintenance_operation(
                         client,
                         dry_run,
-                        &t.schema_name,
-                        &t.table_name,
-                        "ANALYZE",
-                        "stale-stats",
-                        "error",
-                        None,
-                        None,
-                        duration_ms,
-                        Some(&e.to_string()),
+                        LogEntry {
+                            schema: &t.schema_name,
+                            table: &t.table_name,
+                            operation: "ANALYZE",
+                            mode: "stale-stats",
+                            status: "error",
+                            dead_tuples_before: None,
+                            dead_tuples_removed: None,
+                            duration_ms,
+                            error_message: Some(&e.to_string()),
+                        },
                     )
                     .await;
                     summary.failed += 1;
