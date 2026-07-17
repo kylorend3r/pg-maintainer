@@ -467,6 +467,7 @@ async fn handle_active_vacuums(
     schema: &str,
     table: &str,
     force: bool,
+    skip_active_vacuum: bool,
     dry_run: bool,
     logger: &Arc<Logger>,
     summary: &mut OperationSummary,
@@ -474,6 +475,21 @@ async fn handle_active_vacuums(
     let active_sessions = find_active_vacuums(client, schema, table).await?;
     if active_sessions.is_empty() {
         return Ok(true); // no conflict — proceed
+    }
+
+    // If --skip-active-vacuum is set, always skip this table
+    if skip_active_vacuum {
+        logger.log(
+            LogLevel::Warning,
+            &format!(
+                "Skipping \"{}\".\"{}\" — {} active VACUUM session(s) found (--skip-active-vacuum)",
+                schema,
+                table,
+                active_sessions.len()
+            ),
+        );
+        summary.skipped += 1;
+        return Ok(false);
     }
 
     let autovacuum_pids: Vec<i32> = active_sessions
@@ -574,6 +590,7 @@ pub async fn run_vacuum_never_vacuumed(
     tables: &[TableInfo],
     dry_run: bool,
     force: bool,
+    skip_active_vacuum: bool,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
     vacuum_truncate: bool,
@@ -609,6 +626,7 @@ pub async fn run_vacuum_never_vacuumed(
             &t.schema_name,
             &t.table_name,
             force,
+            skip_active_vacuum,
             dry_run,
             logger,
             &mut summary,
@@ -701,6 +719,7 @@ pub async fn run_analyze_never_analyzed(
     tables: &[TableInfo],
     dry_run: bool,
     force: bool,
+    skip_active_vacuum: bool,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<OperationSummary> {
@@ -733,6 +752,7 @@ pub async fn run_analyze_never_analyzed(
             &t.schema_name,
             &t.table_name,
             force,
+            skip_active_vacuum,
             dry_run,
             logger,
             &mut summary,
@@ -806,6 +826,7 @@ pub async fn run_freeze_wraparound(
     tables: &[FreezeTableInfo],
     dry_run: bool,
     force: bool,
+    skip_active_vacuum: bool,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
     vacuum_truncate: bool,
@@ -867,6 +888,7 @@ pub async fn run_freeze_wraparound(
             &t.schema_name,
             &t.table_name,
             force,
+            skip_active_vacuum,
             dry_run,
             logger,
             &mut summary,
@@ -946,6 +968,7 @@ pub async fn run_bloat_vacuum(
     tables: &[BloatTableInfo],
     dry_run: bool,
     force: bool,
+    skip_active_vacuum: bool,
     already_handled: &std::collections::HashSet<(String, String)>,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
@@ -998,6 +1021,7 @@ pub async fn run_bloat_vacuum(
             &t.schema_name,
             &t.table_name,
             force,
+            skip_active_vacuum,
             dry_run,
             logger,
             &mut summary,
@@ -1090,6 +1114,7 @@ pub async fn run_stale_stats_analyze(
     analyze_scale_factor: f64,
     dry_run: bool,
     force: bool,
+    skip_active_vacuum: bool,
     already_handled: &std::collections::HashSet<(String, String)>,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
@@ -1136,6 +1161,7 @@ pub async fn run_stale_stats_analyze(
             &t.schema_name,
             &t.table_name,
             force,
+            skip_active_vacuum,
             dry_run,
             logger,
             &mut summary,

@@ -82,6 +82,11 @@ struct Args {
     #[arg(long, default_value = "false")]
     force: bool,
 
+    /// Never terminate a conflicting VACUUM (autovacuum or manual); always skip the table instead.
+    /// Overrides --force. Mutually exclusive with --force.
+    #[arg(long, default_value = "false")]
+    skip_active_vacuum: bool,
+
     /// Cap each mode to its top N candidate tables (default: no limit).
     #[arg(long, help = "Limit each mode to top N tables (default: unlimited)")]
     limit: Option<i64>,
@@ -231,6 +236,7 @@ struct Config {
     dry_run: Option<bool>,
     mode: Option<Vec<String>>,
     force: Option<bool>,
+    skip_active_vacuum: Option<bool>,
     limit: Option<i64>,
     bloat_threshold_pct: Option<f64>,
     analyze_threshold: Option<i64>,
@@ -312,6 +318,9 @@ fn merge_config(file: Config, mut args: Args) -> Args {
     }
     if !args.force {
         args.force = file.force.unwrap_or(false);
+    }
+    if !args.skip_active_vacuum {
+        args.skip_active_vacuum = file.skip_active_vacuum.unwrap_or(false);
     }
     if args.limit.is_none() {
         args.limit = file.limit;
@@ -464,6 +473,13 @@ async fn main() -> Result<()> {
         && limit <= 0
     {
         return Err(anyhow::anyhow!("--limit ({limit}) must be > 0"));
+    }
+
+    // Validate --force and --skip-active-vacuum are mutually exclusive
+    if args.force && args.skip_active_vacuum {
+        return Err(anyhow::anyhow!(
+            "--force and --skip-active-vacuum are mutually exclusive: choose one intent (terminate or skip)"
+        ));
     }
 
     // Validate --analyze-threshold and --analyze-scale-factor
@@ -779,6 +795,7 @@ async fn main() -> Result<()> {
             &candidates,
             args.dry_run,
             args.force,
+            args.skip_active_vacuum,
             &logger,
             &mut shutdown_rx,
             args.vacuum_truncate,
@@ -817,6 +834,7 @@ async fn main() -> Result<()> {
             &candidates,
             args.dry_run,
             args.force,
+            args.skip_active_vacuum,
             &logger,
             &mut shutdown_rx,
         )
@@ -852,6 +870,7 @@ async fn main() -> Result<()> {
             &candidates,
             args.dry_run,
             args.force,
+            args.skip_active_vacuum,
             &logger,
             &mut shutdown_rx,
             args.vacuum_truncate,
@@ -895,6 +914,7 @@ async fn main() -> Result<()> {
             &candidates,
             args.dry_run,
             args.force,
+            args.skip_active_vacuum,
             &already_handled,
             &logger,
             &mut shutdown_rx,
@@ -979,6 +999,7 @@ async fn main() -> Result<()> {
             effective_analyze_scale_factor,
             args.dry_run,
             args.force,
+            args.skip_active_vacuum,
             &already_handled,
             &logger,
             &mut shutdown_rx,
