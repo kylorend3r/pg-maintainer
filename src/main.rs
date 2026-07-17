@@ -768,6 +768,18 @@ async fn main() -> Result<()> {
 
     let start = std::time::Instant::now();
 
+    let run_policy = pg_maintainer::types::RunPolicy {
+        dry_run: args.dry_run,
+        force: args.force,
+        skip_active_vacuum: args.skip_active_vacuum,
+    };
+
+    let vacuum_opts = pg_maintainer::types::VacuumOptions {
+        truncate: args.vacuum_truncate,
+        disable_page_skipping: args.vacuum_disable_page_skipping,
+        skip_locked: args.vacuum_skip_locked,
+    };
+
     let mut already_handled: HashSet<(String, String)> = HashSet::new();
 
     // ── Phase 1: VACUUM never-vacuumed tables ─────────────────────────────────
@@ -793,16 +805,10 @@ async fn main() -> Result<()> {
         operations::run_vacuum_never_vacuumed(
             &client,
             &candidates,
-            args.dry_run,
-            args.force,
-            args.skip_active_vacuum,
+            run_policy,
             &logger,
             &mut shutdown_rx,
-            pg_maintainer::types::VacuumOptions {
-                truncate: args.vacuum_truncate,
-                disable_page_skipping: args.vacuum_disable_page_skipping,
-                skip_locked: args.vacuum_skip_locked,
-            },
+            vacuum_opts,
         )
         .await
         .context("VACUUM phase failed")?
@@ -870,16 +876,10 @@ async fn main() -> Result<()> {
         operations::run_freeze_wraparound(
             &client,
             &candidates,
-            args.dry_run,
-            args.force,
-            args.skip_active_vacuum,
+            run_policy,
             &logger,
             &mut shutdown_rx,
-            pg_maintainer::types::VacuumOptions {
-                truncate: args.vacuum_truncate,
-                disable_page_skipping: args.vacuum_disable_page_skipping,
-                skip_locked: args.vacuum_skip_locked,
-            },
+            vacuum_opts,
         )
         .await
         .context("VACUUM FREEZE phase failed")?
@@ -916,17 +916,11 @@ async fn main() -> Result<()> {
         let summary = operations::run_bloat_vacuum(
             &client,
             &candidates,
-            args.dry_run,
-            args.force,
-            args.skip_active_vacuum,
+            run_policy,
             &already_handled,
             &logger,
             &mut shutdown_rx,
-            pg_maintainer::types::VacuumOptions {
-                truncate: args.vacuum_truncate,
-                disable_page_skipping: args.vacuum_disable_page_skipping,
-                skip_locked: args.vacuum_skip_locked,
-            },
+            vacuum_opts,
         )
         .await
         .context("VACUUM BLOAT phase failed")?;

@@ -6,6 +6,14 @@ pub struct VacuumOptions {
     pub skip_locked: bool,
 }
 
+/// Shared run-level policy flags threaded through every maintenance phase.
+#[derive(Debug, Clone, Copy)]
+pub struct RunPolicy {
+    pub dry_run: bool,
+    pub force: bool,
+    pub skip_active_vacuum: bool,
+}
+
 /// A table identified by schema + name with optional row-count hints from pg_stat_user_tables.
 #[derive(Debug, Clone)]
 pub struct TableInfo {

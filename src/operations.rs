@@ -1,6 +1,8 @@
 use crate::logging::{LogContext, LogLevel, Logger};
 use crate::queries;
-use crate::types::{BloatTableInfo, FreezeTableInfo, OperationSummary, TableInfo, VacuumOptions};
+use crate::types::{
+    BloatTableInfo, FreezeTableInfo, OperationSummary, RunPolicy, TableInfo, VacuumOptions,
+};
 use crate::vacuum_output;
 use anyhow::Result;
 use std::sync::Arc;
@@ -520,9 +522,7 @@ async fn handle_active_vacuums(
     client: &Client,
     schema: &str,
     table: &str,
-    force: bool,
-    skip_active_vacuum: bool,
-    dry_run: bool,
+    policy: RunPolicy,
     logger: &Arc<Logger>,
     summary: &mut OperationSummary,
 ) -> Result<bool> {
@@ -532,7 +532,7 @@ async fn handle_active_vacuums(
     }
 
     // If --skip-active-vacuum is set, always skip this table
-    if skip_active_vacuum {
+    if policy.skip_active_vacuum {
         logger.log(
             LogLevel::Warning,
             &format!(
@@ -559,7 +559,7 @@ async fn handle_active_vacuums(
 
     // Always terminate autovacuum workers
     if !autovacuum_pids.is_empty() {
-        if dry_run {
+        if policy.dry_run {
             logger.log(
                 LogLevel::Warning,
                 &format!(
@@ -585,8 +585,8 @@ async fn handle_active_vacuums(
 
     // Manual VACUUM sessions gate on --force
     if !manual_pids.is_empty() {
-        if force {
-            if dry_run {
+        if policy.force {
+            if policy.dry_run {
                 logger.log(
                     LogLevel::Warning,
                     &format!(
@@ -642,9 +642,7 @@ const BACKEND_TYPE_AUTOVACUUM_WORKER: &str = "autovacuum worker";
 pub async fn run_vacuum_never_vacuumed(
     client: &Client,
     tables: &[TableInfo],
-    dry_run: bool,
-    force: bool,
-    skip_active_vacuum: bool,
+    policy: RunPolicy,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
     vacuum_opts: VacuumOptions,
@@ -677,9 +675,7 @@ pub async fn run_vacuum_never_vacuumed(
             client,
             &t.schema_name,
             &t.table_name,
-            force,
-            skip_active_vacuum,
-            dry_run,
+            policy,
             logger,
             &mut summary,
         )
@@ -689,7 +685,7 @@ pub async fn run_vacuum_never_vacuumed(
             continue;
         }
 
-        if dry_run {
+        if policy.dry_run {
             logger.log(
                 LogLevel::Info,
                 &format!(
@@ -735,7 +731,7 @@ pub async fn run_vacuum_never_vacuumed(
                 }
                 log_maintenance_operation(
                     client,
-                    dry_run,
+                    policy.dry_run,
                     LogEntry {
                         schema: &t.schema_name,
                         table: &t.table_name,
@@ -771,7 +767,7 @@ pub async fn run_vacuum_never_vacuumed(
                     );
                     log_maintenance_operation(
                         client,
-                        dry_run,
+                        policy.dry_run,
                         LogEntry {
                             schema: &t.schema_name,
                             table: &t.table_name,
@@ -822,6 +818,12 @@ pub async fn run_analyze_never_analyzed(
         &format!("Found {} never-analyzed table(s).", tables.len()),
     );
 
+    let policy = RunPolicy {
+        dry_run,
+        force,
+        skip_active_vacuum,
+    };
+
     for (i, t) in tables.iter().enumerate() {
         // Check if shutdown was requested
         if *shutdown_rx.borrow() {
@@ -835,9 +837,7 @@ pub async fn run_analyze_never_analyzed(
             client,
             &t.schema_name,
             &t.table_name,
-            force,
-            skip_active_vacuum,
-            dry_run,
+            policy,
             logger,
             &mut summary,
         )
@@ -942,9 +942,7 @@ pub async fn run_analyze_never_analyzed(
 pub async fn run_freeze_wraparound(
     client: &Client,
     tables: &[FreezeTableInfo],
-    dry_run: bool,
-    force: bool,
-    skip_active_vacuum: bool,
+    policy: RunPolicy,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
     vacuum_opts: VacuumOptions,
@@ -1003,9 +1001,7 @@ pub async fn run_freeze_wraparound(
             client,
             &t.schema_name,
             &t.table_name,
-            force,
-            skip_active_vacuum,
-            dry_run,
+            policy,
             logger,
             &mut summary,
         )
@@ -1015,7 +1011,7 @@ pub async fn run_freeze_wraparound(
             continue;
         }
 
-        if dry_run {
+        if policy.dry_run {
             logger.log(
                 LogLevel::Info,
                 &format!(
@@ -1047,7 +1043,7 @@ pub async fn run_freeze_wraparound(
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_FREEZE, start.elapsed());
                 log_maintenance_operation(
                     client,
-                    dry_run,
+                    policy.dry_run,
                     LogEntry {
                         schema: &t.schema_name,
                         table: &t.table_name,
@@ -1083,7 +1079,7 @@ pub async fn run_freeze_wraparound(
                     );
                     log_maintenance_operation(
                         client,
-                        dry_run,
+                        policy.dry_run,
                         LogEntry {
                             schema: &t.schema_name,
                             table: &t.table_name,
@@ -1114,9 +1110,7 @@ pub async fn run_freeze_wraparound(
 pub async fn run_bloat_vacuum(
     client: &Client,
     tables: &[BloatTableInfo],
-    dry_run: bool,
-    force: bool,
-    skip_active_vacuum: bool,
+    policy: RunPolicy,
     already_handled: &std::collections::HashSet<(String, String)>,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
@@ -1166,9 +1160,7 @@ pub async fn run_bloat_vacuum(
             client,
             &t.schema_name,
             &t.table_name,
-            force,
-            skip_active_vacuum,
-            dry_run,
+            policy,
             logger,
             &mut summary,
         )
@@ -1178,7 +1170,7 @@ pub async fn run_bloat_vacuum(
             continue;
         }
 
-        if dry_run {
+        if policy.dry_run {
             logger.log(
                 LogLevel::Info,
                 &format!(
@@ -1220,7 +1212,7 @@ pub async fn run_bloat_vacuum(
                 }
                 log_maintenance_operation(
                     client,
-                    dry_run,
+                    policy.dry_run,
                     LogEntry {
                         schema: &t.schema_name,
                         table: &t.table_name,
@@ -1256,7 +1248,7 @@ pub async fn run_bloat_vacuum(
                     );
                     log_maintenance_operation(
                         client,
-                        dry_run,
+                        policy.dry_run,
                         LogEntry {
                             schema: &t.schema_name,
                             table: &t.table_name,
@@ -1312,6 +1304,12 @@ pub async fn run_stale_stats_analyze(
         &format!("Found {} stale-stats candidate(s).", tables.len()),
     );
 
+    let policy = RunPolicy {
+        dry_run,
+        force,
+        skip_active_vacuum,
+    };
+
     for (i, t) in tables.iter().enumerate() {
         // Check if shutdown was requested
         if *shutdown_rx.borrow() {
@@ -1338,9 +1336,7 @@ pub async fn run_stale_stats_analyze(
             client,
             &t.schema_name,
             &t.table_name,
-            force,
-            skip_active_vacuum,
-            dry_run,
+            policy,
             logger,
             &mut summary,
         )
