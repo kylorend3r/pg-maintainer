@@ -192,6 +192,23 @@ struct Args {
     #[arg(long, default_value = "10")]
     connect_timeout_seconds: u64,
 
+    // ── VACUUM options ──────────────────────────────────────────────────────────
+    /// Add TRUNCATE to VACUUM commands (default: true, matches PostgreSQL default).
+    /// Pass --no-vacuum-truncate to disable and avoid the ACCESS EXCLUSIVE lock
+    /// truncation requires.
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    vacuum_truncate: bool,
+
+    /// Add DISABLE_PAGE_SKIPPING to VACUUM commands (default: false).
+    /// Forces a full scan even of all-visible pages.
+    #[arg(long, default_value = "false")]
+    vacuum_disable_page_skipping: bool,
+
+    /// Add SKIP_LOCKED to VACUUM commands (default: false).
+    /// Skip a table instead of waiting if a conflicting lock is held.
+    #[arg(long, default_value = "false")]
+    vacuum_skip_locked: bool,
+
     // ── Config file ──────────────────────────────────────────────────────────
     /// Path to a TOML configuration file. CLI arguments take precedence.
     #[arg(short = 'C', long, value_name = "FILE")]
@@ -232,6 +249,9 @@ struct Config {
     silence_mode: Option<bool>,
     statement_timeout_seconds: Option<u64>,
     connect_timeout_seconds: Option<u64>,
+    vacuum_truncate: Option<bool>,
+    vacuum_disable_page_skipping: Option<bool>,
+    vacuum_skip_locked: Option<bool>,
 }
 
 fn resolve_env_interpolation(value: Option<String>) -> Option<String> {
@@ -369,6 +389,18 @@ fn merge_config(file: Config, mut args: Args) -> Args {
         && let Some(v) = file.connect_timeout_seconds
     {
         args.connect_timeout_seconds = v;
+    }
+
+    if args.vacuum_truncate
+        && let Some(v) = file.vacuum_truncate
+    {
+        args.vacuum_truncate = v;
+    }
+    if !args.vacuum_disable_page_skipping {
+        args.vacuum_disable_page_skipping = file.vacuum_disable_page_skipping.unwrap_or(false);
+    }
+    if !args.vacuum_skip_locked {
+        args.vacuum_skip_locked = file.vacuum_skip_locked.unwrap_or(false);
     }
 
     args
@@ -734,6 +766,9 @@ async fn main() -> Result<()> {
             args.force,
             &logger,
             &mut shutdown_rx,
+            args.vacuum_truncate,
+            args.vacuum_disable_page_skipping,
+            args.vacuum_skip_locked,
         )
         .await
         .context("VACUUM phase failed")?
@@ -804,6 +839,9 @@ async fn main() -> Result<()> {
             args.force,
             &logger,
             &mut shutdown_rx,
+            args.vacuum_truncate,
+            args.vacuum_disable_page_skipping,
+            args.vacuum_skip_locked,
         )
         .await
         .context("VACUUM FREEZE phase failed")?
@@ -845,6 +883,9 @@ async fn main() -> Result<()> {
             &already_handled,
             &logger,
             &mut shutdown_rx,
+            args.vacuum_truncate,
+            args.vacuum_disable_page_skipping,
+            args.vacuum_skip_locked,
         )
         .await
         .context("VACUUM BLOAT phase failed")?;

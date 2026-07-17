@@ -47,6 +47,11 @@ wraparound-min-age = 200000000
 # ── Maintenance memory ────────────────────────────────────────────────────────
 maintenance-work-mem-gb = 1   # max: 32
 
+# ── VACUUM options ────────────────────────────────────────────────────────────
+vacuum-truncate = true                # truncate empty pages at end of table (default: true)
+# vacuum-disable-page-skipping = false # disable skipping all-visible pages (default: false)
+# vacuum-skip-locked = false           # skip table if conflicting lock held (default: false)
+
 # ── SSL ───────────────────────────────────────────────────────────────────────
 sslmode = "disable"   # disable | require | verify-ca | verify-full
 # ssl-ca-cert     = "/path/to/ca.pem"

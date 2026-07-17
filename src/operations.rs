@@ -365,9 +365,23 @@ async fn vacuum_table(
     client: &Client,
     schema: &str,
     table: &str,
+    truncate: bool,
+    disable_page_skipping: bool,
+    skip_locked: bool,
 ) -> Result<(), tokio_postgres::Error> {
+    let mut opts = vec!["VERBOSE".to_string()];
+    if !truncate {
+        opts.push("TRUNCATE FALSE".to_string());
+    }
+    if disable_page_skipping {
+        opts.push("DISABLE_PAGE_SKIPPING".to_string());
+    }
+    if skip_locked {
+        opts.push("SKIP_LOCKED".to_string());
+    }
     let sql = format!(
-        "VACUUM (VERBOSE) \"{}\".\"{}\"",
+        "VACUUM ({}) \"{}\".\"{}\"",
+        opts.join(", "),
         quote_ident(schema),
         quote_ident(table)
     );
@@ -393,11 +407,25 @@ async fn freeze_table(
     client: &Client,
     schema: &str,
     table: &str,
+    truncate: bool,
+    disable_page_skipping: bool,
+    skip_locked: bool,
 ) -> Result<(), tokio_postgres::Error> {
     // INDEX_CLEANUP FALSE avoids index bloat during aggressive freeze passes.
     // VERBOSE surfaces progress notices to the PostgreSQL log.
+    let mut opts = vec!["VERBOSE".to_string(), "FREEZE".to_string(), "INDEX_CLEANUP FALSE".to_string()];
+    if !truncate {
+        opts.push("TRUNCATE FALSE".to_string());
+    }
+    if disable_page_skipping {
+        opts.push("DISABLE_PAGE_SKIPPING".to_string());
+    }
+    if skip_locked {
+        opts.push("SKIP_LOCKED".to_string());
+    }
     let sql = format!(
-        "VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE) \"{}\".\"{}\"",
+        "VACUUM ({}) \"{}\".\"{}\"",
+        opts.join(", "),
         quote_ident(schema),
         quote_ident(table)
     );
@@ -533,6 +561,9 @@ pub async fn run_vacuum_never_vacuumed(
     force: bool,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
+    vacuum_truncate: bool,
+    vacuum_disable_page_skipping: bool,
+    vacuum_skip_locked: bool,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary {
         total: tables.len(),
@@ -592,7 +623,16 @@ pub async fn run_vacuum_never_vacuumed(
             OP_VACUUM,
         );
         let start = Instant::now();
-        match vacuum_table(client, &t.schema_name, &t.table_name).await {
+        match vacuum_table(
+            client,
+            &t.schema_name,
+            &t.table_name,
+            vacuum_truncate,
+            vacuum_disable_page_skipping,
+            vacuum_skip_locked,
+        )
+        .await
+        {
             Ok(()) => {
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_VACUUM, start.elapsed());
                 summary.succeeded += 1;
@@ -739,6 +779,9 @@ pub async fn run_freeze_wraparound(
     force: bool,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
+    vacuum_truncate: bool,
+    vacuum_disable_page_skipping: bool,
+    vacuum_skip_locked: bool,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary {
         total: tables.len(),
@@ -824,7 +867,16 @@ pub async fn run_freeze_wraparound(
             OP_FREEZE,
         );
         let start = Instant::now();
-        match freeze_table(client, &t.schema_name, &t.table_name).await {
+        match freeze_table(
+            client,
+            &t.schema_name,
+            &t.table_name,
+            vacuum_truncate,
+            vacuum_disable_page_skipping,
+            vacuum_skip_locked,
+        )
+        .await
+        {
             Ok(()) => {
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_FREEZE, start.elapsed());
                 summary.succeeded += 1;
@@ -868,6 +920,9 @@ pub async fn run_bloat_vacuum(
     already_handled: &std::collections::HashSet<(String, String)>,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
+    vacuum_truncate: bool,
+    vacuum_disable_page_skipping: bool,
+    vacuum_skip_locked: bool,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary {
         total: tables.len(),
@@ -939,7 +994,16 @@ pub async fn run_bloat_vacuum(
 
         logger.log_table_start(i + 1, tables.len(), &t.schema_name, &t.table_name, OP_BLOAT);
         let start = Instant::now();
-        match vacuum_table(client, &t.schema_name, &t.table_name).await {
+        match vacuum_table(
+            client,
+            &t.schema_name,
+            &t.table_name,
+            vacuum_truncate,
+            vacuum_disable_page_skipping,
+            vacuum_skip_locked,
+        )
+        .await
+        {
             Ok(()) => {
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_BLOAT, start.elapsed());
                 summary.succeeded += 1;
