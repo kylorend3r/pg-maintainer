@@ -5,3 +5,4 @@ pub mod logging;
 pub mod operations;
 pub mod queries;
 pub mod types;
+pub mod vacuum_output;

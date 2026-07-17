@@ -310,3 +310,13 @@ pub const FIND_STALE_STATS_TABLE: &str = r#"
       AND t.n_mod_since_analyze > ($3::bigint + $4::float8 * COALESCE(t.n_live_tup, 0))
     ORDER BY t.n_mod_since_analyze DESC;
 "#;
+
+/// Get the dead tuple count for a specific table.
+/// Parameters:
+///   $1 = schema name (text)
+///   $2 = table name (text)
+pub const GET_DEAD_TUPLE_COUNT: &str = r#"
+    SELECT COALESCE(n_dead_tup, 0) AS n_dead_tup
+    FROM pg_stat_user_tables
+    WHERE schemaname = $1 AND relname = $2;
+"#;

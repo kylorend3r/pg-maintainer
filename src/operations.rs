@@ -1,6 +1,7 @@
 use crate::logging::{LogContext, LogLevel, Logger};
 use crate::queries;
 use crate::types::{BloatTableInfo, FreezeTableInfo, OperationSummary, TableInfo};
+use crate::vacuum_output;
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Instant;
@@ -368,7 +369,13 @@ async fn vacuum_table(
     truncate: bool,
     disable_page_skipping: bool,
     skip_locked: bool,
-) -> Result<(), tokio_postgres::Error> {
+) -> Result<Option<i64>, tokio_postgres::Error> {
+    // Get dead tuple count before VACUUM
+    let dead_before: i64 = client
+        .query_one(queries::GET_DEAD_TUPLE_COUNT, &[&schema, &table])
+        .await?
+        .get(0);
+
     let mut opts = vec!["VERBOSE".to_string()];
     if !truncate {
         opts.push("TRUNCATE FALSE".to_string());
@@ -386,7 +393,15 @@ async fn vacuum_table(
         quote_ident(table)
     );
     client.execute(&sql, &[]).await?;
-    Ok(())
+
+    // Get dead tuple count after VACUUM
+    let dead_after: i64 = client
+        .query_one(queries::GET_DEAD_TUPLE_COUNT, &[&schema, &table])
+        .await?
+        .get(0);
+
+    let removed = vacuum_output::get_dead_tuples_removed(dead_before, dead_after);
+    Ok(removed)
 }
 
 async fn analyze_table(
@@ -633,8 +648,22 @@ pub async fn run_vacuum_never_vacuumed(
         )
         .await
         {
-            Ok(()) => {
+            Ok(removed) => {
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_VACUUM, start.elapsed());
+                if let Some(0) = removed {
+                    logger.log(
+                        LogLevel::Warning,
+                        &format!(
+                            "VACUUM on \"{}\".\"{}\" removed 0 dead tuples — table may not have needed vacuuming, or another process already cleaned it up",
+                            t.schema_name, t.table_name
+                        ),
+                    );
+                } else if let Some(n) = removed {
+                    logger.log(
+                        LogLevel::Info,
+                        &format!("VACUUM on \"{}\".\"{}\" removed {n} dead tuple(s)", t.schema_name, t.table_name),
+                    );
+                }
                 summary.succeeded += 1;
             }
             Err(e) => {
@@ -1004,8 +1033,22 @@ pub async fn run_bloat_vacuum(
         )
         .await
         {
-            Ok(()) => {
+            Ok(removed) => {
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_BLOAT, start.elapsed());
+                if let Some(0) = removed {
+                    logger.log(
+                        LogLevel::Warning,
+                        &format!(
+                            "VACUUM on \"{}\".\"{}\" removed 0 dead tuples — table may not have needed vacuuming, or another process already cleaned it up",
+                            t.schema_name, t.table_name
+                        ),
+                    );
+                } else if let Some(n) = removed {
+                    logger.log(
+                        LogLevel::Info,
+                        &format!("VACUUM on \"{}\".\"{}\" removed {n} dead tuple(s)", t.schema_name, t.table_name),
+                    );
+                }
                 summary.succeeded += 1;
             }
             Err(e) => {
