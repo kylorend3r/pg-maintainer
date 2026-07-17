@@ -13,7 +13,7 @@ pub fn get_password_from_pgpass(
 ) -> Result<Option<String>> {
     let pgpass_path = env::var("PGPASSFILE").unwrap_or_else(|_| {
         let home = env::var("HOME").unwrap_or_else(|_| env::var("USERPROFILE").unwrap_or_default());
-        format!("{}/.pgpass", home)
+        format!("{home}/.pgpass")
     });
 
     let pgpass_path = Path::new(&pgpass_path);

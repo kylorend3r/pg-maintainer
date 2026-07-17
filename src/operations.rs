@@ -21,7 +21,7 @@ pub async fn try_acquire_schema_lock(client: &Client, schemas: &[String]) -> Res
     let row = client
         .query_one("SELECT hashtext($1)::int AS lock_id", &[&schemas_str])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to compute schema lock ID: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to compute schema lock ID: {e}"))?;
 
     let lock_id: i32 = row.get("lock_id");
 
@@ -32,14 +32,13 @@ pub async fn try_acquire_schema_lock(client: &Client, schemas: &[String]) -> Res
             &[&lock_id],
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to acquire advisory lock: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to acquire advisory lock: {e}"))?;
 
     let acquired: bool = row.get("acquired");
     if !acquired {
         return Err(anyhow::anyhow!(
-            "Another pg-maintainer run is already active on schema(s): {}. \
-             Release the existing lock or wait for the other process to complete.",
-            schemas_str
+            "Another pg-maintainer run is already active on schema(s): {schemas_str}. \
+             Release the existing lock or wait for the other process to complete."
         ));
     }
 
@@ -67,7 +66,7 @@ pub async fn find_never_vacuumed(
                 &[&schemas_vec, &tbl, &min_bytes, &max_bytes],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query never-vacuumed tables: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to query never-vacuumed tables: {e}"))?
     } else {
         client
             .query(
@@ -75,7 +74,7 @@ pub async fn find_never_vacuumed(
                 &[&schemas_vec, &min_bytes, &max_bytes, &limit],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query never-vacuumed tables: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to query never-vacuumed tables: {e}"))?
     };
 
     Ok(rows
@@ -107,7 +106,7 @@ pub async fn find_never_analyzed(
                 &[&schemas_vec, &tbl, &min_bytes, &max_bytes],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query never-analyzed tables: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to query never-analyzed tables: {e}"))?
     } else {
         client
             .query(
@@ -115,7 +114,7 @@ pub async fn find_never_analyzed(
                 &[&schemas_vec, &min_bytes, &max_bytes, &limit],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query never-analyzed tables: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to query never-analyzed tables: {e}"))?
     };
 
     Ok(rows
@@ -148,7 +147,7 @@ pub async fn find_wraparound_candidates(
                 &[&schemas_vec, &min_age, &tbl, &min_bytes, &max_bytes],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query wraparound candidates: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to query wraparound candidates: {e}"))?
     } else {
         client
             .query(
@@ -156,7 +155,7 @@ pub async fn find_wraparound_candidates(
                 &[&schemas_vec, &min_age, &min_bytes, &max_bytes, &limit],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query wraparound candidates: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to query wraparound candidates: {e}"))?
     };
 
     Ok(rows
@@ -172,6 +171,7 @@ pub async fn find_wraparound_candidates(
 
 /// Returns tables with excessive dead tuples (bloat candidates).
 /// If `table` is Some, only that table is checked.
+#[allow(clippy::too_many_arguments)]
 pub async fn find_bloat_candidates(
     client: &Client,
     schemas: &[String],
@@ -197,7 +197,7 @@ pub async fn find_bloat_candidates(
                 ],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query bloat candidates: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to query bloat candidates: {e}"))?
     } else {
         client
             .query(
@@ -212,7 +212,7 @@ pub async fn find_bloat_candidates(
                 ],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query bloat candidates: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to query bloat candidates: {e}"))?
     };
 
     Ok(rows
@@ -234,7 +234,7 @@ pub async fn get_freeze_max_age(client: &Client) -> Result<i64> {
     let row = client
         .query_one(queries::GET_FREEZE_MAX_AGE, &[])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to read autovacuum_freeze_max_age: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read autovacuum_freeze_max_age: {e}"))?;
     Ok(row.get::<_, i64>(0))
 }
 
@@ -244,7 +244,7 @@ pub async fn get_analyze_settings(client: &Client) -> Result<(i64, f64)> {
     let row = client
         .query_one(queries::GET_ANALYZE_SETTINGS, &[])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to read autovacuum_analyze settings: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read autovacuum_analyze settings: {e}"))?;
     Ok((
         row.get::<_, i64>("analyze_threshold"),
         row.get::<_, f64>("analyze_scale_factor"),
@@ -253,6 +253,7 @@ pub async fn get_analyze_settings(client: &Client) -> Result<(i64, f64)> {
 
 /// Returns tables where modifications since the last analyze exceed the threshold.
 /// If `table` is Some, only that table is checked.
+#[allow(clippy::too_many_arguments)]
 pub async fn find_stale_stats_candidates(
     client: &Client,
     schemas: &[String],
@@ -278,7 +279,7 @@ pub async fn find_stale_stats_candidates(
                 ],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query stale-stats candidates: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to query stale-stats candidates: {e}"))?
     } else {
         client
             .query(
@@ -293,7 +294,7 @@ pub async fn find_stale_stats_candidates(
                 ],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query stale-stats candidates: {}", e))?
+            .map_err(|e| anyhow::anyhow!("Failed to query stale-stats candidates: {e}"))?
     };
 
     Ok(rows
@@ -321,12 +322,7 @@ async fn find_active_vacuums(
         .query(queries::FIND_ACTIVE_VACUUMS_ON_TABLE, &[&schema, &table])
         .await
         .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to check active vacuums on \"{}\".\"{}\" : {}",
-                schema,
-                table,
-                e
-            )
+            anyhow::anyhow!("Failed to check active vacuums on \"{schema}\".\"{table}\" : {e}")
         })?;
     Ok(rows
         .into_iter()
@@ -345,7 +341,7 @@ async fn terminate_backends(client: &Client, pids: &[i32]) -> Result<()> {
         client
             .execute("SELECT pg_terminate_backend($1)", &[pid])
             .await
-            .map_err(|e| anyhow::anyhow!("pg_terminate_backend({}) failed: {}", pid, e))?;
+            .map_err(|e| anyhow::anyhow!("pg_terminate_backend({pid}) failed: {e}"))?;
     }
     Ok(())
 }
@@ -538,8 +534,10 @@ pub async fn run_vacuum_never_vacuumed(
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<OperationSummary> {
-    let mut summary = OperationSummary::default();
-    summary.total = tables.len();
+    let mut summary = OperationSummary {
+        total: tables.len(),
+        ..Default::default()
+    };
 
     if tables.is_empty() {
         logger.log(LogLevel::Success, "No never-vacuumed tables found.");
@@ -637,8 +635,10 @@ pub async fn run_analyze_never_analyzed(
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<OperationSummary> {
-    let mut summary = OperationSummary::default();
-    summary.total = tables.len();
+    let mut summary = OperationSummary {
+        total: tables.len(),
+        ..Default::default()
+    };
 
     if tables.is_empty() {
         logger.log(LogLevel::Success, "No never-analyzed tables found.");
@@ -740,8 +740,10 @@ pub async fn run_freeze_wraparound(
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<OperationSummary> {
-    let mut summary = OperationSummary::default();
-    summary.total = tables.len();
+    let mut summary = OperationSummary {
+        total: tables.len(),
+        ..Default::default()
+    };
 
     if tables.is_empty() {
         logger.log(
@@ -867,8 +869,10 @@ pub async fn run_bloat_vacuum(
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<OperationSummary> {
-    let mut summary = OperationSummary::default();
-    summary.total = tables.len();
+    let mut summary = OperationSummary {
+        total: tables.len(),
+        ..Default::default()
+    };
 
     if tables.is_empty() {
         logger.log(
@@ -971,6 +975,7 @@ pub async fn run_bloat_vacuum(
 /// If `force` is true, active vacuums on the table are terminated before starting.
 /// Otherwise tables with an active manual VACUUM are skipped (autovacuum is always terminated).
 /// Tables already analyzed by earlier phases are skipped (tracked in `already_handled`).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_stale_stats_analyze(
     client: &Client,
     tables: &[crate::types::StaleStatsTableInfo],
@@ -982,8 +987,10 @@ pub async fn run_stale_stats_analyze(
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<OperationSummary> {
-    let mut summary = OperationSummary::default();
-    summary.total = tables.len();
+    let mut summary = OperationSummary {
+        total: tables.len(),
+        ..Default::default()
+    };
 
     if tables.is_empty() {
         logger.log(LogLevel::Success, "No stale-stats candidates found.");
@@ -1096,7 +1103,7 @@ pub async fn discover_all_user_schemas(client: &Client) -> Result<Vec<String>> {
     let rows = client
         .query(queries::GET_ALL_USER_SCHEMAS, &[])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to discover schemas: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to discover schemas: {e}"))?;
 
     Ok(rows
         .into_iter()

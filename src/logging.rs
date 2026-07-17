@@ -137,16 +137,15 @@ impl Logger {
             format!(
                 "{}\n",
                 serde_json::to_string(&event).unwrap_or_else(|_| format!(
-                    "{{\"timestamp\":\"{}\",\"level\":\"{}\",\"message\":\"{}\"}}",
-                    ts, level_str, message
+                    "{{\"timestamp\":\"{ts}\",\"level\":\"{level_str}\",\"message\":\"{message}\"}}"
                 ))
             )
         } else {
-            format!("[{}] [{}] {}\n", ts, level_str, message)
+            format!("[{ts}] [{level_str}] {message}\n")
         };
 
         if !self.silence_mode {
-            print!("{}", line);
+            print!("{line}");
         }
 
         if self.ensure_file_handle() {
@@ -185,13 +184,13 @@ impl Logger {
             format!(
                 "{}\n",
                 serde_json::to_string(&event)
-                    .unwrap_or_else(|_| format!("{{\"message\":\"{}\"}}", message))
+                    .unwrap_or_else(|_| format!("{{\"message\":\"{message}\"}}"))
             )
         } else {
-            format!("[{}] [{}] {}\n", ts, level_str, message)
+            format!("[{ts}] [{level_str}] {message}\n")
         };
 
-        print!("{}", line);
+        print!("{line}");
 
         if self.ensure_file_handle() {
             let mut guard = match self.file_handle.lock() {
@@ -208,10 +207,7 @@ impl Logger {
     }
 
     pub fn log_table_start(&self, num: usize, total: usize, schema: &str, table: &str, op: &str) {
-        let msg = format!(
-            "[{}/{}] Starting {} on \"{}\".\"{}\"",
-            num, total, op, schema, table
-        );
+        let msg = format!("[{num}/{total}] Starting {op} on \"{schema}\".\"{table}\"");
         self.log_with_context(
             LogLevel::Info,
             &msg,
@@ -232,10 +228,7 @@ impl Logger {
         op: &str,
         duration: std::time::Duration,
     ) {
-        let msg = format!(
-            "Completed {} on \"{}\".\"{}\" in {:.2?}",
-            op, schema, table, duration
-        );
+        let msg = format!("Completed {op} on \"{schema}\".\"{table}\" in {duration:.2?}");
         self.log_with_context(
             LogLevel::Success,
             &msg,
@@ -251,7 +244,7 @@ impl Logger {
     }
 
     pub fn log_table_failed(&self, schema: &str, table: &str, op: &str, reason: &str) {
-        let msg = format!("Failed {} on \"{}\".\"{}\" — {}", op, schema, table, reason);
+        let msg = format!("Failed {op} on \"{schema}\".\"{table}\" — {reason}");
         self.log_with_context(
             LogLevel::Error,
             &msg,

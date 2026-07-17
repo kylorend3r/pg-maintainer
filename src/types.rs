@@ -61,8 +61,7 @@ impl std::str::FromStr for SslMode {
             "verify-ca" => Ok(SslMode::VerifyCa),
             "verify-full" => Ok(SslMode::VerifyFull),
             _ => Err(format!(
-                "Invalid sslmode '{}'. Must be one of: disable, require, verify-ca, verify-full",
-                s
+                "Invalid sslmode '{s}'. Must be one of: disable, require, verify-ca, verify-full"
             )),
         }
     }
@@ -93,8 +92,7 @@ impl std::str::FromStr for LogFormat {
             "text" => Ok(LogFormat::Text),
             "json" => Ok(LogFormat::Json),
             _ => Err(format!(
-                "Invalid log format '{}'. Must be one of: 'text', 'json'",
-                s
+                "Invalid log format '{s}'. Must be one of: 'text', 'json'"
             )),
         }
     }
@@ -142,8 +140,7 @@ impl std::str::FromStr for Mode {
             "bloated" => Ok(Mode::Bloated),
             "stale-stats" => Ok(Mode::StaleStats),
             _ => Err(format!(
-                "Invalid mode '{}'. Must be one of: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats",
-                s
+                "Invalid mode '{s}'. Must be one of: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats"
             )),
         }
     }

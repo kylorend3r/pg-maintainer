@@ -140,7 +140,7 @@ fn escape_libpq_value(s: &str) -> String {
         .any(|c| c.is_whitespace() || c == '\'' || c == '\\')
     {
         let escaped = s.replace('\\', "\\\\").replace('\'', "\\'");
-        format!("'{}'", escaped)
+        format!("'{escaped}'")
     } else {
         s.to_owned()
     }
@@ -202,7 +202,7 @@ pub async fn connect(
     let statement_timeout_sql = if statement_timeout_seconds == 0 {
         "SET statement_timeout TO 0".to_string()
     } else {
-        format!("SET statement_timeout TO '{}s'", statement_timeout_seconds)
+        format!("SET statement_timeout TO '{statement_timeout_seconds}s'")
     };
     client
         .execute(&statement_timeout_sql, &[])
@@ -234,7 +234,7 @@ pub async fn connect_raw(
             .context("Failed to connect to PostgreSQL")?;
         tokio::spawn(async move {
             if let Err(e) = conn.await {
-                eprintln!("Connection error: {}", e);
+                eprintln!("Connection error: {e}");
             }
         });
         return Ok(client);
@@ -302,7 +302,7 @@ pub async fn connect_raw(
 
     tokio::spawn(async move {
         if let Err(e) = conn.await {
-            eprintln!("Connection error: {}", e);
+            eprintln!("Connection error: {e}");
         }
     });
 
@@ -328,10 +328,7 @@ pub async fn set_maintenance_work_mem(
     client: &tokio_postgres::Client,
     maintenance_work_mem_gb: u64,
 ) -> Result<()> {
-    let sql = format!(
-        "SET maintenance_work_mem TO '{}GB'",
-        maintenance_work_mem_gb
-    );
+    let sql = format!("SET maintenance_work_mem TO '{maintenance_work_mem_gb}GB'");
     client
         .execute(&sql, &[])
         .await
@@ -362,7 +359,7 @@ pub async fn set_vacuum_buffer_usage_limit(client: &tokio_postgres::Client) -> R
 
     client
         .execute(
-            &format!("SET vacuum_buffer_usage_limit TO '{}kB'", limit_kb),
+            &format!("SET vacuum_buffer_usage_limit TO '{limit_kb}kB'"),
             &[],
         )
         .await
@@ -390,10 +387,7 @@ pub async fn set_max_parallel_maintenance_workers(client: &tokio_postgres::Clien
 
     client
         .execute(
-            &format!(
-                "SET max_parallel_maintenance_workers TO {}",
-                max_parallel_workers
-            ),
+            &format!("SET max_parallel_maintenance_workers TO {max_parallel_workers}"),
             &[],
         )
         .await
@@ -408,6 +402,6 @@ pub fn format_kb_readable(kb: i64) -> String {
     } else if kb >= 1024 {
         format!("{:.1}MB", kb as f64 / 1024.0)
     } else {
-        format!("{}kB", kb)
+        format!("{kb}kB")
     }
 }

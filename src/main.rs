@@ -247,12 +247,12 @@ fn resolve_env_interpolation(value: Option<String>) -> Option<String> {
 fn load_config_file(path: &str) -> Result<Config> {
     let file_path = Path::new(path);
     if !file_path.exists() {
-        return Err(anyhow::anyhow!("Configuration file not found: {}", path));
+        return Err(anyhow::anyhow!("Configuration file not found: {path}"));
     }
     let content = std::fs::read_to_string(path)
-        .with_context(|| format!("Failed to read configuration file: {}", path))?;
+        .with_context(|| format!("Failed to read configuration file: {path}"))?;
     let mut cfg = toml::from_str::<Config>(&content)
-        .with_context(|| format!("Failed to parse TOML configuration file: {}", path))?;
+        .with_context(|| format!("Failed to parse TOML configuration file: {path}"))?;
     cfg.password = resolve_env_interpolation(cfg.password);
     Ok(cfg)
 }
@@ -409,7 +409,7 @@ async fn main() -> Result<()> {
         for mode_str in mode_strs {
             let mode: Mode = mode_str
                 .parse()
-                .map_err(|e: String| anyhow::anyhow!("Invalid mode: {}", e))?;
+                .map_err(|e: String| anyhow::anyhow!("Invalid mode: {e}"))?;
             modes.insert(mode);
         }
         if modes.is_empty() {
@@ -432,7 +432,7 @@ async fn main() -> Result<()> {
     // Validate --limit
     if let Some(limit) = args.limit {
         if limit <= 0 {
-            return Err(anyhow::anyhow!("--limit ({}) must be > 0", limit));
+            return Err(anyhow::anyhow!("--limit ({limit}) must be > 0"));
         }
     }
 
@@ -440,16 +440,14 @@ async fn main() -> Result<()> {
     if let Some(threshold) = args.analyze_threshold {
         if threshold < 0 {
             return Err(anyhow::anyhow!(
-                "--analyze-threshold ({}) must be >= 0",
-                threshold
+                "--analyze-threshold ({threshold}) must be >= 0"
             ));
         }
     }
     if let Some(factor) = args.analyze_scale_factor {
         if factor < 0.0 {
             return Err(anyhow::anyhow!(
-                "--analyze-scale-factor ({}) must be >= 0.0",
-                factor
+                "--analyze-scale-factor ({factor}) must be >= 0.0"
             ));
         }
     }
@@ -472,9 +470,7 @@ async fn main() -> Result<()> {
     }
     if min_gb > max_gb && max_gb != f64::INFINITY {
         return Err(anyhow::anyhow!(
-            "--min-table-size-gb ({}) must be <= --max-table-size-gb ({})",
-            min_gb,
-            max_gb
+            "--min-table-size-gb ({min_gb}) must be <= --max-table-size-gb ({max_gb})"
         ));
     }
     let min_bytes = (min_gb * 1_073_741_824.0) as i64;
@@ -497,8 +493,7 @@ async fn main() -> Result<()> {
     if let Some(pct) = args.wraparound_pct {
         if !(0.0..=100.0).contains(&pct) {
             return Err(anyhow::anyhow!(
-                "--wraparound-pct ({}) must be between 0 and 100",
-                pct
+                "--wraparound-pct ({pct}) must be between 0 and 100"
             ));
         }
     }
@@ -528,14 +523,14 @@ async fn main() -> Result<()> {
                 let _ = shutdown_tx_term.send(true);
             }
             Err(e) => {
-                eprintln!("Failed to setup SIGTERM handler: {}", e);
+                eprintln!("Failed to setup SIGTERM handler: {e}");
             }
         }
     });
 
     tokio::spawn(async move {
         if let Err(e) = tokio::signal::ctrl_c().await {
-            eprintln!("Failed to setup SIGINT handler: {}", e);
+            eprintln!("Failed to setup SIGINT handler: {e}");
         } else {
             let _ = shutdown_tx_int.send(true);
         }
@@ -649,10 +644,7 @@ async fn main() -> Result<()> {
         ),
         Err(e) => logger.log(
             LogLevel::Warning,
-            &format!(
-                "Could not set vacuum_buffer_usage_limit (requires PostgreSQL 16+): {}",
-                e
-            ),
+            &format!("Could not set vacuum_buffer_usage_limit (requires PostgreSQL 16+): {e}"),
         ),
     }
 
@@ -663,13 +655,12 @@ async fn main() -> Result<()> {
         Ok(workers) => logger.log(
             LogLevel::Info,
             &format!(
-                "max_parallel_maintenance_workers set to {} (matches max_parallel_workers)",
-                workers
+                "max_parallel_maintenance_workers set to {workers} (matches max_parallel_workers)"
             ),
         ),
         Err(e) => logger.log(
             LogLevel::Warning,
-            &format!("Could not set max_parallel_maintenance_workers: {}", e),
+            &format!("Could not set max_parallel_maintenance_workers: {e}"),
         ),
     }
 
@@ -693,10 +684,7 @@ async fn main() -> Result<()> {
     if let Some(tbl) = table_filter {
         logger.log(
             LogLevel::Info,
-            &format!(
-                "Table filter active — limiting all phases to table \"{}\"",
-                tbl
-            ),
+            &format!("Table filter active — limiting all phases to table \"{tbl}\""),
         );
     }
 
@@ -709,8 +697,7 @@ async fn main() -> Result<()> {
         logger.log(
             LogLevel::Info,
             &format!(
-                "Wraparound threshold: {:.1}% of freeze_max_age {} = {} XID age",
-                pct, freeze_max_age, computed
+                "Wraparound threshold: {pct:.1}% of freeze_max_age {freeze_max_age} = {computed} XID age"
             ),
         );
         computed
@@ -907,9 +894,7 @@ async fn main() -> Result<()> {
         logger.log(
             LogLevel::Info,
             &format!(
-                "Stale-stats thresholds: analyze_threshold={} (server: {}), analyze_scale_factor={} (server: {})",
-                effective_analyze_threshold, server_analyze_threshold,
-                effective_analyze_scale_factor, server_analyze_scale_factor,
+                "Stale-stats thresholds: analyze_threshold={effective_analyze_threshold} (server: {server_analyze_threshold}), analyze_scale_factor={effective_analyze_scale_factor} (server: {server_analyze_scale_factor})",
             ),
         );
 
@@ -979,9 +964,8 @@ async fn main() -> Result<()> {
     logger.log_always(
         LogLevel::Success,
         &format!(
-            "pg-maintainer completed in {:.2?} — \
-             tables processed: {} | succeeded: {} | failed: {}",
-            elapsed, total_tables, total_ok, total_fail
+            "pg-maintainer completed in {elapsed:.2?} — \
+             tables processed: {total_tables} | succeeded: {total_ok} | failed: {total_fail}"
         ),
     );
 
@@ -1057,8 +1041,7 @@ async fn main() -> Result<()> {
 
     if total_fail > 0 {
         return Err(anyhow::anyhow!(
-            "pg-maintainer completed with {} error(s)",
-            total_fail
+            "pg-maintainer completed with {total_fail} error(s)"
         ));
     }
 

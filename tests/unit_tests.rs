@@ -248,8 +248,7 @@ fn test_partition_excluding_queries_all_filter_relkind_p() {
     for (name, sql) in &queries_to_check {
         assert!(
             sql.contains("relkind != 'p'"),
-            "{} must exclude partitioned parent tables (relkind != 'p')",
-            name
+            "{name} must exclude partitioned parent tables (relkind != 'p')"
         );
     }
 }

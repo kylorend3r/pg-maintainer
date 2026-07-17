@@ -421,7 +421,7 @@ async fn test_log_file_json_entries_are_valid_json() {
                 continue;
             }
             let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
-            assert!(parsed.is_ok(), "Log line should be valid JSON: {}", line);
+            assert!(parsed.is_ok(), "Log line should be valid JSON: {line}");
         }
     }
 
