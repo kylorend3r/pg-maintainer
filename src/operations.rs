@@ -9,6 +9,12 @@ use tokio::sync::watch;
 use tokio_postgres::Client;
 use tokio_postgres::error::SqlState;
 
+/// Result of a table maintenance operation.
+struct OperationResult {
+    dead_tuples_before: Option<i64>,
+    dead_tuples_removed: Option<i64>,
+}
+
 // ─── Concurrency guard ────────────────────────────────────────────────────────
 
 /// Try to acquire a session-scoped advisory lock for the given schema list.
@@ -44,6 +50,44 @@ pub async fn try_acquire_schema_lock(client: &Client, schemas: &[String]) -> Res
     }
 
     Ok(())
+}
+
+// ─── Logging to maintenance logbook ──────────────────────────────────────────────
+
+/// Insert a maintenance operation log entry (only if not dry_run).
+/// Returns Ok(()) on success, silently continues on error.
+async fn log_maintenance_operation(
+    client: &Client,
+    dry_run: bool,
+    schema: &str,
+    table: &str,
+    operation: &str,
+    mode: &str,
+    status: &str,
+    dead_tuples_before: Option<i64>,
+    dead_tuples_removed: Option<i64>,
+    duration_ms: i64,
+    error_message: Option<&str>,
+) {
+    if dry_run {
+        return; // Don't log during dry-run
+    }
+
+    let params: &[&(dyn tokio_postgres::types::ToSql + Sync)] = &[
+        &schema,
+        &table,
+        &operation,
+        &mode,
+        &status,
+        &dead_tuples_before,
+        &dead_tuples_removed,
+        &duration_ms,
+        &error_message,
+    ];
+
+    if let Err(_) = client.execute(queries::INSERT_MAINTENANCE_LOG, params).await {
+        // Silently ignore logging errors — they should not fail maintenance operations
+    }
 }
 
 // ─── Discovery queries ────────────────────────────────────────────────────────
@@ -369,7 +413,7 @@ async fn vacuum_table(
     truncate: bool,
     disable_page_skipping: bool,
     skip_locked: bool,
-) -> Result<Option<i64>, tokio_postgres::Error> {
+) -> Result<OperationResult, tokio_postgres::Error> {
     // Get dead tuple count before VACUUM
     let dead_before: i64 = client
         .query_one(queries::GET_DEAD_TUPLE_COUNT, &[&schema, &table])
@@ -401,21 +445,27 @@ async fn vacuum_table(
         .get(0);
 
     let removed = vacuum_output::get_dead_tuples_removed(dead_before, dead_after);
-    Ok(removed)
+    Ok(OperationResult {
+        dead_tuples_before: if dead_before > 0 { Some(dead_before) } else { None },
+        dead_tuples_removed: removed,
+    })
 }
 
 async fn analyze_table(
     client: &Client,
     schema: &str,
     table: &str,
-) -> Result<(), tokio_postgres::Error> {
+) -> Result<OperationResult, tokio_postgres::Error> {
     let sql = format!(
         "ANALYZE \"{}\".\"{}\"",
         quote_ident(schema),
         quote_ident(table)
     );
     client.execute(&sql, &[]).await?;
-    Ok(())
+    Ok(OperationResult {
+        dead_tuples_before: None,
+        dead_tuples_removed: None,
+    })
 }
 
 async fn freeze_table(
@@ -425,7 +475,7 @@ async fn freeze_table(
     truncate: bool,
     disable_page_skipping: bool,
     skip_locked: bool,
-) -> Result<(), tokio_postgres::Error> {
+) -> Result<OperationResult, tokio_postgres::Error> {
     // INDEX_CLEANUP FALSE avoids index bloat during aggressive freeze passes.
     // VERBOSE surfaces progress notices to the PostgreSQL log.
     let mut opts = vec!["VERBOSE".to_string(), "FREEZE".to_string(), "INDEX_CLEANUP FALSE".to_string()];
@@ -445,7 +495,10 @@ async fn freeze_table(
         quote_ident(table)
     );
     client.execute(&sql, &[]).await?;
-    Ok(())
+    Ok(OperationResult {
+        dead_tuples_before: None,
+        dead_tuples_removed: None,
+    })
 }
 
 // ─── Shared active-vacuum gate ────────────────────────────────────────────────
@@ -666,9 +719,10 @@ pub async fn run_vacuum_never_vacuumed(
         )
         .await
         {
-            Ok(removed) => {
+            Ok(result) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_VACUUM, start.elapsed());
-                if let Some(0) = removed {
+                if let Some(0) = result.dead_tuples_removed {
                     logger.log(
                         LogLevel::Warning,
                         &format!(
@@ -676,15 +730,30 @@ pub async fn run_vacuum_never_vacuumed(
                             t.schema_name, t.table_name
                         ),
                     );
-                } else if let Some(n) = removed {
+                } else if let Some(n) = result.dead_tuples_removed {
                     logger.log(
                         LogLevel::Info,
                         &format!("VACUUM on \"{}\".\"{}\" removed {n} dead tuple(s)", t.schema_name, t.table_name),
                     );
                 }
+                log_maintenance_operation(
+                    client,
+                    dry_run,
+                    &t.schema_name,
+                    &t.table_name,
+                    "VACUUM",
+                    "never-vacuumed",
+                    "success",
+                    result.dead_tuples_before,
+                    result.dead_tuples_removed,
+                    duration_ms,
+                    None,
+                )
+                .await;
                 summary.succeeded += 1;
             }
             Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
@@ -701,6 +770,20 @@ pub async fn run_vacuum_never_vacuumed(
                         OP_VACUUM,
                         &e.to_string(),
                     );
+                    log_maintenance_operation(
+                        client,
+                        dry_run,
+                        &t.schema_name,
+                        &t.table_name,
+                        "VACUUM",
+                        "never-vacuumed",
+                        "error",
+                        None,
+                        None,
+                        duration_ms,
+                        Some(&e.to_string()),
+                    )
+                    .await;
                     summary.failed += 1;
                 }
             }
@@ -783,16 +866,32 @@ pub async fn run_analyze_never_analyzed(
         );
         let start = Instant::now();
         match analyze_table(client, &t.schema_name, &t.table_name).await {
-            Ok(()) => {
+            Ok(result) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(
                     &t.schema_name,
                     &t.table_name,
                     OP_ANALYZE,
                     start.elapsed(),
                 );
+                log_maintenance_operation(
+                    client,
+                    dry_run,
+                    &t.schema_name,
+                    &t.table_name,
+                    "ANALYZE",
+                    "never-analyzed",
+                    "success",
+                    result.dead_tuples_before,
+                    result.dead_tuples_removed,
+                    duration_ms,
+                    None,
+                )
+                .await;
                 summary.succeeded += 1;
             }
             Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
@@ -809,6 +908,20 @@ pub async fn run_analyze_never_analyzed(
                         OP_ANALYZE,
                         &e.to_string(),
                     );
+                    log_maintenance_operation(
+                        client,
+                        dry_run,
+                        &t.schema_name,
+                        &t.table_name,
+                        "ANALYZE",
+                        "never-analyzed",
+                        "error",
+                        None,
+                        None,
+                        duration_ms,
+                        Some(&e.to_string()),
+                    )
+                    .await;
                     summary.failed += 1;
                 }
             }
@@ -928,11 +1041,27 @@ pub async fn run_freeze_wraparound(
         )
         .await
         {
-            Ok(()) => {
+            Ok(result) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_FREEZE, start.elapsed());
+                log_maintenance_operation(
+                    client,
+                    dry_run,
+                    &t.schema_name,
+                    &t.table_name,
+                    "FREEZE",
+                    "wraparound",
+                    "success",
+                    result.dead_tuples_before,
+                    result.dead_tuples_removed,
+                    duration_ms,
+                    None,
+                )
+                .await;
                 summary.succeeded += 1;
             }
             Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
@@ -949,6 +1078,20 @@ pub async fn run_freeze_wraparound(
                         OP_FREEZE,
                         &e.to_string(),
                     );
+                    log_maintenance_operation(
+                        client,
+                        dry_run,
+                        &t.schema_name,
+                        &t.table_name,
+                        "FREEZE",
+                        "wraparound",
+                        "error",
+                        None,
+                        None,
+                        duration_ms,
+                        Some(&e.to_string()),
+                    )
+                    .await;
                     summary.failed += 1;
                 }
             }
@@ -1057,9 +1200,10 @@ pub async fn run_bloat_vacuum(
         )
         .await
         {
-            Ok(removed) => {
+            Ok(result) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_BLOAT, start.elapsed());
-                if let Some(0) = removed {
+                if let Some(0) = result.dead_tuples_removed {
                     logger.log(
                         LogLevel::Warning,
                         &format!(
@@ -1067,15 +1211,30 @@ pub async fn run_bloat_vacuum(
                             t.schema_name, t.table_name
                         ),
                     );
-                } else if let Some(n) = removed {
+                } else if let Some(n) = result.dead_tuples_removed {
                     logger.log(
                         LogLevel::Info,
                         &format!("VACUUM on \"{}\".\"{}\" removed {n} dead tuple(s)", t.schema_name, t.table_name),
                     );
                 }
+                log_maintenance_operation(
+                    client,
+                    dry_run,
+                    &t.schema_name,
+                    &t.table_name,
+                    "VACUUM",
+                    "bloated",
+                    "success",
+                    result.dead_tuples_before,
+                    result.dead_tuples_removed,
+                    duration_ms,
+                    None,
+                )
+                .await;
                 summary.succeeded += 1;
             }
             Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
@@ -1092,6 +1251,20 @@ pub async fn run_bloat_vacuum(
                         OP_BLOAT,
                         &e.to_string(),
                     );
+                    log_maintenance_operation(
+                        client,
+                        dry_run,
+                        &t.schema_name,
+                        &t.table_name,
+                        "VACUUM",
+                        "bloated",
+                        "error",
+                        None,
+                        None,
+                        duration_ms,
+                        Some(&e.to_string()),
+                    )
+                    .await;
                     summary.failed += 1;
                 }
             }
@@ -1194,16 +1367,32 @@ pub async fn run_stale_stats_analyze(
         );
         let start = Instant::now();
         match analyze_table(client, &t.schema_name, &t.table_name).await {
-            Ok(()) => {
+            Ok(result) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(
                     &t.schema_name,
                     &t.table_name,
                     "ANALYZE (STALE STATS)",
                     start.elapsed(),
                 );
+                log_maintenance_operation(
+                    client,
+                    dry_run,
+                    &t.schema_name,
+                    &t.table_name,
+                    "ANALYZE",
+                    "stale-stats",
+                    "success",
+                    result.dead_tuples_before,
+                    result.dead_tuples_removed,
+                    duration_ms,
+                    None,
+                )
+                .await;
                 summary.succeeded += 1;
             }
             Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
@@ -1220,6 +1409,20 @@ pub async fn run_stale_stats_analyze(
                         "ANALYZE (STALE STATS)",
                         &e.to_string(),
                     );
+                    log_maintenance_operation(
+                        client,
+                        dry_run,
+                        &t.schema_name,
+                        &t.table_name,
+                        "ANALYZE",
+                        "stale-stats",
+                        "error",
+                        None,
+                        None,
+                        duration_ms,
+                        Some(&e.to_string()),
+                    )
+                    .await;
                     summary.failed += 1;
                 }
             }
