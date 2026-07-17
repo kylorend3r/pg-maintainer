@@ -242,11 +242,17 @@ Options:
   -f, --dry-run
           Show what would be done without executing any maintenance commands
       --mode <MODE>
-          Modes to run: vacuum, analyze, freeze, bloat
+          Modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats
       --force
-          Terminate active vacuum/autovacuum on each table before maintaining it. Without --force, tables with an active vacuum are skipped instead
+          Terminate a conflicting manual VACUUM before starting (autovacuum workers are always terminated automatically)
+      --limit <LIMIT>
+          Limit each mode to top N tables (default: unlimited)
       --bloat-threshold-pct <BLOAT_THRESHOLD_PCT>
           Bloat threshold percentage (default: 80.0). Tables with dead tuple ratio exceeding this percentage are considered bloat candidates [default: 80]
+      --analyze-threshold <ANALYZE_THRESHOLD>
+          Modification-count floor for stale-stats (default: read from server's autovacuum_analyze_threshold)
+      --analyze-scale-factor <ANALYZE_SCALE_FACTOR>
+          Scale factor for stale-stats (default: read from server's autovacuum_analyze_scale_factor)
       --min-table-size-gb <GB>
           Minimum table size in GB (default: 0, no floor)
       --max-table-size-gb <GB>
@@ -254,7 +260,7 @@ Options:
       --wraparound-min-age <WRAPAROUND_MIN_AGE>
           Minimum XID age threshold for wraparound candidates (default: 200000000) [default: 200000000]
       --wraparound-pct <PCT>
-          Wraparound threshold as % of autovacuum_freeze_max_age (0-100). Overrides --wraparound-min-age.
+          Wraparound threshold as % of autovacuum_freeze_max_age (0–100). Overrides --wraparound-min-age.
   -w, --maintenance-work-mem-gb <MAINTENANCE_WORK_MEM_GB>
           maintenance_work_mem in GB for this session (default: 1, max: 32) [default: 1]
       --sslmode <SSLMODE>
@@ -271,6 +277,10 @@ Options:
           [default: text]
       --silence-mode
           Suppress terminal output; all logs still go to the log file
+      --statement-timeout-seconds <STATEMENT_TIMEOUT_SECONDS>
+          Statement timeout in seconds for each VACUUM/ANALYZE operation (default: 0 = unbounded). Set this for unattended runs to prevent VACUUM from running indefinitely if it gets stuck [default: 0]
+      --connect-timeout-seconds <CONNECT_TIMEOUT_SECONDS>
+          TCP connection timeout in seconds (default: 10). A network partition can hang startup for the OS default; this bounds that [default: 10]
   -C, --config <FILE>
           Path to a TOML configuration file. CLI arguments take precedence
   -h, --help
@@ -281,11 +291,14 @@ Options:
 
 ## Key Features
 
-- **Selective modes**: run any combination of `vacuum`, `analyze`, `freeze`, `bloat` via `--mode`; omit it to run all four
+- **Selective modes**: run any combination of `never-vacuumed`, `never-analyzed`, `wraparound`, `bloated`, `stale-stats` via `--mode`; omit it to run all five
 - **Cross-mode dedup**: a table already handled by an earlier mode in the same run is skipped by later modes instead of being reprocessed
 - **Statistics-based bloat detection**: dead-tuple ratio from `pg_stat_user_tables`, no extension or extra table scan required
-- **Size filtering**: `--min-table-size-gb`/`--max-table-size-gb` apply across all four modes
+- **Size filtering**: `--min-table-size-gb`/`--max-table-size-gb` apply across all five modes
 - **Active-vacuum awareness**: tables with a conflicting VACUUM/autovacuum in progress are skipped, or the conflicting backend is terminated with `--force`
+- **Concurrency guard**: per-schema advisory lock prevents two pg-maintainer instances from running against the same schema simultaneously
+- **Bounded execution**: `--statement-timeout-seconds` (default: unbounded) limits how long a single VACUUM/ANALYZE can run; `--connect-timeout-seconds` (default: 10s) bounds TCP connection establishment
+- **Graceful shutdown**: SIGTERM and SIGINT signal handlers stop after the current table, run the final summary, and exit cleanly
 - **Fast-fail locking**: 10ms `lock_timeout` for the session so runs never block indefinitely behind another process's lock
 - **Automatic session tuning**: `vacuum_buffer_usage_limit` is set to 1/16 of `shared_buffers` (PostgreSQL 16+) and `max_parallel_maintenance_workers` is raised to match the server's `max_parallel_workers`, so VACUUM's index-cleanup phase can use the full parallel worker pool instead of the low built-in default. Both are session-scoped `SET`s, no server config changes required. Neither affects Phase 3 (freeze), which runs with `INDEX_CLEANUP FALSE`.
 - **Wraparound tuning**: flag candidates by absolute XID age (`--wraparound-min-age`) or by percentage of `autovacuum_freeze_max_age` (`--wraparound-pct`)
@@ -294,6 +307,36 @@ Options:
 - **Config file**: TOML configuration with env-var interpolation (`password = "${PG_PASSWORD}"`) and CLI override support
 - **Structured logging**: text or JSON log format, optional silence mode, buffered file + stdout output
 - **Dry run**: preview every VACUUM/ANALYZE candidate and command before anything executes
+
+## Production Notes
+
+When running pg-maintainer unattended (cron, Kubernetes CronJob, etc.):
+
+- **Set a statement timeout**: Use `--statement-timeout-seconds` to bound how long a single VACUUM/ANALYZE can run. A network partition or an unexpectedly slow table can otherwise cause the process to hang indefinitely. Recommended: 3600 (1 hour) for production.
+  ```bash
+  pg-maintainer --schema public --statement-timeout-seconds 3600
+  ```
+
+- **Connection timeout protection**: `--connect-timeout-seconds` (default: 10) prevents TCP hangs during cluster failover or network issues. Adjust if your network regularly adds latency.
+
+- **Concurrency guard**: pg-maintainer automatically acquires a session-scoped advisory lock after connecting, scoped to the resolved schema list. This prevents two instances from running concurrently against the same schema(s), eliminating race conditions. If you see "another pg-maintainer run is already active," wait for the existing process to complete or explicitly release the lock:
+  ```sql
+  SELECT pg_advisory_unlock(hashtext('schema_list'));
+  ```
+
+- **Graceful shutdown**: The tool responds to SIGTERM and SIGINT (Ctrl-C) by stopping after the current table, running the final summary, and exiting cleanly with code 130. This is safe for Kubernetes termination grace periods and systemd timeouts.
+
+- **Log rotation**: If writing to a file, handle log rotation externally (logrotate, Docker volume drivers, etc.); pg-maintainer does not implement built-in log rotation.
+
+### Known Limitations and Backlog
+
+The following features are intentionally deferred to a future hardening pass:
+
+- **Replication-lag awareness**: Throttle maintenance on standby lag exceeding a threshold — requires connection to a standby or replication status monitoring.
+- **Disk-space checks**: Skip maintenance if free space is below a threshold — requires filesystem access assumptions or queries against `pg_tablespace`.
+- **Log rotation**: Built-in log file rotation — requires external log management (systemd, Docker, logrotate, etc.).
+
+These are substantial additions that deserve their own design and implementation pass, separate from the core safety/correctness hardening.
 
 ## Integration Testing
 
