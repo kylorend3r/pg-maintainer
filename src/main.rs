@@ -297,10 +297,10 @@ fn merge_config(file: Config, mut args: Args) -> Args {
         args.limit = file.limit;
     }
 
-    if args.bloat_threshold_pct == DEFAULT_BLOAT_THRESHOLD_PCT {
-        if let Some(v) = file.bloat_threshold_pct {
-            args.bloat_threshold_pct = v;
-        }
+    if args.bloat_threshold_pct == DEFAULT_BLOAT_THRESHOLD_PCT
+        && let Some(v) = file.bloat_threshold_pct
+    {
+        args.bloat_threshold_pct = v;
     }
     if args.analyze_threshold.is_none() {
         args.analyze_threshold = file.analyze_threshold;
@@ -315,26 +315,25 @@ fn merge_config(file: Config, mut args: Args) -> Args {
         args.max_table_size_gb = file.max_table_size_gb;
     }
 
-    if args.wraparound_min_age == DEFAULT_WRAPAROUND_MIN_AGE {
-        if let Some(v) = file.wraparound_min_age {
-            args.wraparound_min_age = v;
-        }
+    if args.wraparound_min_age == DEFAULT_WRAPAROUND_MIN_AGE
+        && let Some(v) = file.wraparound_min_age
+    {
+        args.wraparound_min_age = v;
     }
     if args.wraparound_pct.is_none() {
         args.wraparound_pct = file.wraparound_pct;
     }
-    if args.maintenance_work_mem_gb == DEFAULT_MAINTENANCE_WORK_MEM_GB {
-        if let Some(v) = file.maintenance_work_mem_gb {
-            args.maintenance_work_mem_gb = v;
-        }
+    if args.maintenance_work_mem_gb == DEFAULT_MAINTENANCE_WORK_MEM_GB
+        && let Some(v) = file.maintenance_work_mem_gb
+    {
+        args.maintenance_work_mem_gb = v;
     }
 
-    if args.sslmode == SslMode::Disable {
-        if let Some(ref s) = file.sslmode {
-            if let Ok(m) = s.parse::<SslMode>() {
-                args.sslmode = m;
-            }
-        }
+    if args.sslmode == SslMode::Disable
+        && let Some(ref s) = file.sslmode
+        && let Ok(m) = s.parse::<SslMode>()
+    {
+        args.sslmode = m;
     }
     if args.ssl_ca_cert.is_none() {
         args.ssl_ca_cert = file.ssl_ca_cert;
@@ -346,31 +345,30 @@ fn merge_config(file: Config, mut args: Args) -> Args {
         args.ssl_client_key = file.ssl_client_key;
     }
 
-    if args.log_file == "maintainer.log" {
-        if let Some(lf) = file.log_file {
-            args.log_file = lf;
-        }
+    if args.log_file == "maintainer.log"
+        && let Some(lf) = file.log_file
+    {
+        args.log_file = lf;
     }
-    if args.log_format == LogFormat::Text {
-        if let Some(ref lf) = file.log_format {
-            if let Ok(f) = lf.parse::<LogFormat>() {
-                args.log_format = f;
-            }
-        }
+    if args.log_format == LogFormat::Text
+        && let Some(ref lf) = file.log_format
+        && let Ok(f) = lf.parse::<LogFormat>()
+    {
+        args.log_format = f;
     }
     if !args.silence_mode {
         args.silence_mode = file.silence_mode.unwrap_or(false);
     }
 
-    if args.statement_timeout_seconds == 0 {
-        if let Some(v) = file.statement_timeout_seconds {
-            args.statement_timeout_seconds = v;
-        }
+    if args.statement_timeout_seconds == 0
+        && let Some(v) = file.statement_timeout_seconds
+    {
+        args.statement_timeout_seconds = v;
     }
-    if args.connect_timeout_seconds == 10 {
-        if let Some(v) = file.connect_timeout_seconds {
-            args.connect_timeout_seconds = v;
-        }
+    if args.connect_timeout_seconds == 10
+        && let Some(v) = file.connect_timeout_seconds
+    {
+        args.connect_timeout_seconds = v;
     }
 
     args
@@ -430,26 +428,26 @@ async fn main() -> Result<()> {
     };
 
     // Validate --limit
-    if let Some(limit) = args.limit {
-        if limit <= 0 {
-            return Err(anyhow::anyhow!("--limit ({limit}) must be > 0"));
-        }
+    if let Some(limit) = args.limit
+        && limit <= 0
+    {
+        return Err(anyhow::anyhow!("--limit ({limit}) must be > 0"));
     }
 
     // Validate --analyze-threshold and --analyze-scale-factor
-    if let Some(threshold) = args.analyze_threshold {
-        if threshold < 0 {
-            return Err(anyhow::anyhow!(
-                "--analyze-threshold ({threshold}) must be >= 0"
-            ));
-        }
+    if let Some(threshold) = args.analyze_threshold
+        && threshold < 0
+    {
+        return Err(anyhow::anyhow!(
+            "--analyze-threshold ({threshold}) must be >= 0"
+        ));
     }
-    if let Some(factor) = args.analyze_scale_factor {
-        if factor < 0.0 {
-            return Err(anyhow::anyhow!(
-                "--analyze-scale-factor ({factor}) must be >= 0.0"
-            ));
-        }
+    if let Some(factor) = args.analyze_scale_factor
+        && factor < 0.0
+    {
+        return Err(anyhow::anyhow!(
+            "--analyze-scale-factor ({factor}) must be >= 0.0"
+        ));
     }
 
     // Validate bloat_threshold_pct range
@@ -490,12 +488,12 @@ async fn main() -> Result<()> {
     }
 
     // Validate wraparound_pct range
-    if let Some(pct) = args.wraparound_pct {
-        if !(0.0..=100.0).contains(&pct) {
-            return Err(anyhow::anyhow!(
-                "--wraparound-pct ({pct}) must be between 0 and 100"
-            ));
-        }
+    if let Some(pct) = args.wraparound_pct
+        && !(0.0..=100.0).contains(&pct)
+    {
+        return Err(anyhow::anyhow!(
+            "--wraparound-pct ({pct}) must be between 0 and 100"
+        ));
     }
 
     let logger = Arc::new(Logger::new(
