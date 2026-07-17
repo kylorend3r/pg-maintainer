@@ -102,9 +102,7 @@ impl ConnectionConfig {
                     })
                 })
             })
-            .or_else(|| {
-                get_password_from_pgpass(&host, port, &database, &username).unwrap_or(None)
-            })
+            .or_else(|| get_password_from_pgpass(&host, port, &database, &username).unwrap_or(None))
             .map(SecretString::new);
 
         Ok(Self {
@@ -138,7 +136,9 @@ impl ConnectionConfig {
 }
 
 fn escape_libpq_value(s: &str) -> String {
-    if s.chars().any(|c| c.is_whitespace() || c == '\'' || c == '\\') {
+    if s.chars()
+        .any(|c| c.is_whitespace() || c == '\'' || c == '\\')
+    {
         let escaped = s.replace('\\', "\\\\").replace('\'', "\\'");
         format!("'{}'", escaped)
     } else {
@@ -160,7 +160,12 @@ fn format_pg_version(version_num: i32) -> String {
     if version_num >= 100000 {
         format!("{}.{}", version_num / 10000, version_num % 10000)
     } else {
-        format!("{}.{}.{}", version_num / 10000, (version_num / 100) % 100, version_num % 100)
+        format!(
+            "{}.{}.{}",
+            version_num / 10000,
+            (version_num / 100) % 100,
+            version_num % 100
+        )
     }
 }
 
@@ -264,11 +269,14 @@ pub async fn connect_raw(
         (Some(cert_path), Some(key_path)) => {
             let cert_data = fs::read(cert_path).context("Failed to read client certificate")?;
             let key_data = fs::read(key_path).context("Failed to read client key")?;
-            let identity = Identity::from_pkcs12(&{
-                let mut combined = cert_data.clone();
-                combined.extend_from_slice(&key_data);
-                combined
-            }, "")
+            let identity = Identity::from_pkcs12(
+                &{
+                    let mut combined = cert_data.clone();
+                    combined.extend_from_slice(&key_data);
+                    combined
+                },
+                "",
+            )
             .or_else(|_| Identity::from_pkcs8(&cert_data, &key_data))
             .context("Failed to parse client certificate and key")?;
             tls_builder.identity(identity);
@@ -282,7 +290,9 @@ pub async fn connect_raw(
     }
 
     let tls = MakeTlsConnector::new(
-        tls_builder.build().context("Failed to build TLS connector")?,
+        tls_builder
+            .build()
+            .context("Failed to build TLS connector")?,
     );
 
     let (client, conn) = cfg
@@ -318,7 +328,10 @@ pub async fn set_maintenance_work_mem(
     client: &tokio_postgres::Client,
     maintenance_work_mem_gb: u64,
 ) -> Result<()> {
-    let sql = format!("SET maintenance_work_mem TO '{}GB'", maintenance_work_mem_gb);
+    let sql = format!(
+        "SET maintenance_work_mem TO '{}GB'",
+        maintenance_work_mem_gb
+    );
     client
         .execute(&sql, &[])
         .await
@@ -330,9 +343,7 @@ pub async fn set_maintenance_work_mem(
 ///
 /// Returns `(shared_buffers_kb, limit_kb)` so the caller can log both values.
 /// Errors on PostgreSQL < 16 where the GUC does not exist.
-pub async fn set_vacuum_buffer_usage_limit(
-    client: &tokio_postgres::Client,
-) -> Result<(i64, i64)> {
+pub async fn set_vacuum_buffer_usage_limit(client: &tokio_postgres::Client) -> Result<(i64, i64)> {
     let row = client
         .query_one(
             "SELECT pg_size_bytes(current_setting('shared_buffers'))",
@@ -371,10 +382,7 @@ pub async fn set_vacuum_buffer_usage_limit(
 /// Returns the value applied so the caller can log it.
 pub async fn set_max_parallel_maintenance_workers(client: &tokio_postgres::Client) -> Result<i32> {
     let row = client
-        .query_one(
-            "SELECT current_setting('max_parallel_workers')::int",
-            &[],
-        )
+        .query_one("SELECT current_setting('max_parallel_workers')::int", &[])
         .await
         .context("Failed to read max_parallel_workers")?;
 

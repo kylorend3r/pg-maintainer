@@ -172,13 +172,11 @@ pub const FIND_WRAPAROUND_CANDIDATES_TABLE: &str = r#"
 
 /// The server's autovacuum_freeze_max_age setting in transactions.
 /// Used to convert a wraparound-percentage threshold into an absolute XID age.
-pub const GET_FREEZE_MAX_AGE: &str =
-    "SELECT current_setting('autovacuum_freeze_max_age')::bigint";
+pub const GET_FREEZE_MAX_AGE: &str = "SELECT current_setting('autovacuum_freeze_max_age')::bigint";
 
 /// The server's numeric version (server_version_num), e.g. 160003 for 16.3.
 /// Used by connection::connect() to enforce the PostgreSQL 14 minimum.
-pub const GET_SERVER_VERSION_NUM: &str =
-    "SELECT current_setting('server_version_num')::int";
+pub const GET_SERVER_VERSION_NUM: &str = "SELECT current_setting('server_version_num')::int";
 
 /// The server's autovacuum_analyze_threshold and autovacuum_analyze_scale_factor
 /// settings. Used as the default stale-stats thresholds unless overridden by

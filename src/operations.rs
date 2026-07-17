@@ -5,8 +5,8 @@ use anyhow::Result;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
-use tokio_postgres::error::SqlState;
 use tokio_postgres::Client;
+use tokio_postgres::error::SqlState;
 
 // ─── Concurrency guard ────────────────────────────────────────────────────────
 
@@ -19,10 +19,7 @@ pub async fn try_acquire_schema_lock(client: &Client, schemas: &[String]) -> Res
     let schemas_str = schemas.join(",");
     // Use hashtext() to convert the schema list to a 32-bit hash suitable for advisory locks
     let row = client
-        .query_one(
-            "SELECT hashtext($1)::int AS lock_id",
-            &[&schemas_str],
-        )
+        .query_one("SELECT hashtext($1)::int AS lock_id", &[&schemas_str])
         .await
         .map_err(|e| anyhow::anyhow!("Failed to compute schema lock ID: {}", e))?;
 
@@ -65,12 +62,18 @@ pub async fn find_never_vacuumed(
     let schemas_vec: Vec<String> = schemas.to_vec();
     let rows = if let Some(tbl) = table {
         client
-            .query(queries::FIND_NEVER_VACUUMED_TABLE, &[&schemas_vec, &tbl, &min_bytes, &max_bytes])
+            .query(
+                queries::FIND_NEVER_VACUUMED_TABLE,
+                &[&schemas_vec, &tbl, &min_bytes, &max_bytes],
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query never-vacuumed tables: {}", e))?
     } else {
         client
-            .query(queries::FIND_NEVER_VACUUMED, &[&schemas_vec, &min_bytes, &max_bytes, &limit])
+            .query(
+                queries::FIND_NEVER_VACUUMED,
+                &[&schemas_vec, &min_bytes, &max_bytes, &limit],
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query never-vacuumed tables: {}", e))?
     };
@@ -99,12 +102,18 @@ pub async fn find_never_analyzed(
     let schemas_vec: Vec<String> = schemas.to_vec();
     let rows = if let Some(tbl) = table {
         client
-            .query(queries::FIND_NEVER_ANALYZED_TABLE, &[&schemas_vec, &tbl, &min_bytes, &max_bytes])
+            .query(
+                queries::FIND_NEVER_ANALYZED_TABLE,
+                &[&schemas_vec, &tbl, &min_bytes, &max_bytes],
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query never-analyzed tables: {}", e))?
     } else {
         client
-            .query(queries::FIND_NEVER_ANALYZED, &[&schemas_vec, &min_bytes, &max_bytes, &limit])
+            .query(
+                queries::FIND_NEVER_ANALYZED,
+                &[&schemas_vec, &min_bytes, &max_bytes, &limit],
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query never-analyzed tables: {}", e))?
     };
@@ -142,7 +151,10 @@ pub async fn find_wraparound_candidates(
             .map_err(|e| anyhow::anyhow!("Failed to query wraparound candidates: {}", e))?
     } else {
         client
-            .query(queries::FIND_WRAPAROUND_CANDIDATES, &[&schemas_vec, &min_age, &min_bytes, &max_bytes, &limit])
+            .query(
+                queries::FIND_WRAPAROUND_CANDIDATES,
+                &[&schemas_vec, &min_age, &min_bytes, &max_bytes, &limit],
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query wraparound candidates: {}", e))?
     };
@@ -175,7 +187,14 @@ pub async fn find_bloat_candidates(
         client
             .query(
                 queries::FIND_BLOAT_CANDIDATES_TABLE,
-                &[&schemas_vec, &tbl, &bloat_threshold_pct, &bloat_min_dead_tup, &min_bytes, &max_bytes],
+                &[
+                    &schemas_vec,
+                    &tbl,
+                    &bloat_threshold_pct,
+                    &bloat_min_dead_tup,
+                    &min_bytes,
+                    &max_bytes,
+                ],
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query bloat candidates: {}", e))?
@@ -183,7 +202,14 @@ pub async fn find_bloat_candidates(
         client
             .query(
                 queries::FIND_BLOAT_CANDIDATES,
-                &[&schemas_vec, &bloat_threshold_pct, &bloat_min_dead_tup, &min_bytes, &max_bytes, &limit],
+                &[
+                    &schemas_vec,
+                    &bloat_threshold_pct,
+                    &bloat_min_dead_tup,
+                    &min_bytes,
+                    &max_bytes,
+                    &limit,
+                ],
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query bloat candidates: {}", e))?
@@ -219,7 +245,10 @@ pub async fn get_analyze_settings(client: &Client) -> Result<(i64, f64)> {
         .query_one(queries::GET_ANALYZE_SETTINGS, &[])
         .await
         .map_err(|e| anyhow::anyhow!("Failed to read autovacuum_analyze settings: {}", e))?;
-    Ok((row.get::<_, i64>("analyze_threshold"), row.get::<_, f64>("analyze_scale_factor")))
+    Ok((
+        row.get::<_, i64>("analyze_threshold"),
+        row.get::<_, f64>("analyze_scale_factor"),
+    ))
 }
 
 /// Returns tables where modifications since the last analyze exceed the threshold.
@@ -239,7 +268,14 @@ pub async fn find_stale_stats_candidates(
         client
             .query(
                 queries::FIND_STALE_STATS_TABLE,
-                &[&schemas_vec, &tbl, &analyze_threshold, &analyze_scale_factor, &min_bytes, &max_bytes],
+                &[
+                    &schemas_vec,
+                    &tbl,
+                    &analyze_threshold,
+                    &analyze_scale_factor,
+                    &min_bytes,
+                    &max_bytes,
+                ],
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query stale-stats candidates: {}", e))?
@@ -247,7 +283,14 @@ pub async fn find_stale_stats_candidates(
         client
             .query(
                 queries::FIND_STALE_STATS,
-                &[&schemas_vec, &analyze_threshold, &analyze_scale_factor, &min_bytes, &max_bytes, &limit],
+                &[
+                    &schemas_vec,
+                    &analyze_threshold,
+                    &analyze_scale_factor,
+                    &min_bytes,
+                    &max_bytes,
+                    &limit,
+                ],
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query stale-stats candidates: {}", e))?
@@ -269,7 +312,11 @@ pub async fn find_stale_stats_candidates(
 /// Returns the PIDs of any VACUUM or autovacuum workers currently running on
 /// the given table, along with backend_type so the caller can distinguish
 /// autovacuum workers from manual VACUUM sessions.
-async fn find_active_vacuums(client: &Client, schema: &str, table: &str) -> Result<Vec<(i32, String)>> {
+async fn find_active_vacuums(
+    client: &Client,
+    schema: &str,
+    table: &str,
+) -> Result<Vec<(i32, String)>> {
     let rows = client
         .query(queries::FIND_ACTIVE_VACUUMS_ON_TABLE, &[&schema, &table])
         .await
@@ -281,7 +328,15 @@ async fn find_active_vacuums(client: &Client, schema: &str, table: &str) -> Resu
                 e
             )
         })?;
-    Ok(rows.into_iter().map(|row| (row.get::<_, i32>("pid"), row.get::<_, String>("backend_type"))).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<_, i32>("pid"),
+                row.get::<_, String>("backend_type"),
+            )
+        })
+        .collect())
 }
 
 /// Terminate the given backend PIDs via pg_terminate_backend().
@@ -310,7 +365,11 @@ fn quote_ident(s: &str) -> String {
     s.replace('"', "\"\"")
 }
 
-async fn vacuum_table(client: &Client, schema: &str, table: &str) -> Result<(), tokio_postgres::Error> {
+async fn vacuum_table(
+    client: &Client,
+    schema: &str,
+    table: &str,
+) -> Result<(), tokio_postgres::Error> {
     let sql = format!(
         "VACUUM (VERBOSE) \"{}\".\"{}\"",
         quote_ident(schema),
@@ -320,13 +379,25 @@ async fn vacuum_table(client: &Client, schema: &str, table: &str) -> Result<(), 
     Ok(())
 }
 
-async fn analyze_table(client: &Client, schema: &str, table: &str) -> Result<(), tokio_postgres::Error> {
-    let sql = format!("ANALYZE \"{}\".\"{}\"", quote_ident(schema), quote_ident(table));
+async fn analyze_table(
+    client: &Client,
+    schema: &str,
+    table: &str,
+) -> Result<(), tokio_postgres::Error> {
+    let sql = format!(
+        "ANALYZE \"{}\".\"{}\"",
+        quote_ident(schema),
+        quote_ident(table)
+    );
     client.execute(&sql, &[]).await?;
     Ok(())
 }
 
-async fn freeze_table(client: &Client, schema: &str, table: &str) -> Result<(), tokio_postgres::Error> {
+async fn freeze_table(
+    client: &Client,
+    schema: &str,
+    table: &str,
+) -> Result<(), tokio_postgres::Error> {
     // INDEX_CLEANUP FALSE avoids index bloat during aggressive freeze passes.
     // VERBOSE surfaces progress notices to the PostgreSQL log.
     let sql = format!(
@@ -515,7 +586,13 @@ pub async fn run_vacuum_never_vacuumed(
             continue;
         }
 
-        logger.log_table_start(i + 1, tables.len(), &t.schema_name, &t.table_name, OP_VACUUM);
+        logger.log_table_start(
+            i + 1,
+            tables.len(),
+            &t.schema_name,
+            &t.table_name,
+            OP_VACUUM,
+        );
         let start = Instant::now();
         match vacuum_table(client, &t.schema_name, &t.table_name).await {
             Ok(()) => {
@@ -533,7 +610,12 @@ pub async fn run_vacuum_never_vacuumed(
                     );
                     summary.skipped += 1;
                 } else {
-                    logger.log_table_failed(&t.schema_name, &t.table_name, OP_VACUUM, &e.to_string());
+                    logger.log_table_failed(
+                        &t.schema_name,
+                        &t.table_name,
+                        OP_VACUUM,
+                        &e.to_string(),
+                    );
                     summary.failed += 1;
                 }
             }
@@ -603,11 +685,22 @@ pub async fn run_analyze_never_analyzed(
             continue;
         }
 
-        logger.log_table_start(i + 1, tables.len(), &t.schema_name, &t.table_name, OP_ANALYZE);
+        logger.log_table_start(
+            i + 1,
+            tables.len(),
+            &t.schema_name,
+            &t.table_name,
+            OP_ANALYZE,
+        );
         let start = Instant::now();
         match analyze_table(client, &t.schema_name, &t.table_name).await {
             Ok(()) => {
-                logger.log_table_success(&t.schema_name, &t.table_name, OP_ANALYZE, start.elapsed());
+                logger.log_table_success(
+                    &t.schema_name,
+                    &t.table_name,
+                    OP_ANALYZE,
+                    start.elapsed(),
+                );
                 summary.succeeded += 1;
             }
             Err(e) => {
@@ -621,7 +714,12 @@ pub async fn run_analyze_never_analyzed(
                     );
                     summary.skipped += 1;
                 } else {
-                    logger.log_table_failed(&t.schema_name, &t.table_name, OP_ANALYZE, &e.to_string());
+                    logger.log_table_failed(
+                        &t.schema_name,
+                        &t.table_name,
+                        OP_ANALYZE,
+                        &e.to_string(),
+                    );
                     summary.failed += 1;
                 }
             }
@@ -642,7 +740,6 @@ pub async fn run_freeze_wraparound(
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<OperationSummary> {
-
     let mut summary = OperationSummary::default();
     summary.total = tables.len();
 
@@ -717,7 +814,13 @@ pub async fn run_freeze_wraparound(
             continue;
         }
 
-        logger.log_table_start(i + 1, tables.len(), &t.schema_name, &t.table_name, OP_FREEZE);
+        logger.log_table_start(
+            i + 1,
+            tables.len(),
+            &t.schema_name,
+            &t.table_name,
+            OP_FREEZE,
+        );
         let start = Instant::now();
         match freeze_table(client, &t.schema_name, &t.table_name).await {
             Ok(()) => {
@@ -735,7 +838,12 @@ pub async fn run_freeze_wraparound(
                     );
                     summary.skipped += 1;
                 } else {
-                    logger.log_table_failed(&t.schema_name, &t.table_name, OP_FREEZE, &e.to_string());
+                    logger.log_table_failed(
+                        &t.schema_name,
+                        &t.table_name,
+                        OP_FREEZE,
+                        &e.to_string(),
+                    );
                     summary.failed += 1;
                 }
             }
@@ -843,7 +951,12 @@ pub async fn run_bloat_vacuum(
                     );
                     summary.skipped += 1;
                 } else {
-                    logger.log_table_failed(&t.schema_name, &t.table_name, OP_BLOAT, &e.to_string());
+                    logger.log_table_failed(
+                        &t.schema_name,
+                        &t.table_name,
+                        OP_BLOAT,
+                        &e.to_string(),
+                    );
                     summary.failed += 1;
                 }
             }
@@ -920,7 +1033,8 @@ pub async fn run_stale_stats_analyze(
         }
 
         if dry_run {
-            let effective_threshold = t.effective_threshold(analyze_threshold, analyze_scale_factor);
+            let effective_threshold =
+                t.effective_threshold(analyze_threshold, analyze_scale_factor);
             logger.log(
                 LogLevel::Info,
                 &format!(
@@ -931,11 +1045,22 @@ pub async fn run_stale_stats_analyze(
             continue;
         }
 
-        logger.log_table_start(i + 1, tables.len(), &t.schema_name, &t.table_name, "ANALYZE (STALE STATS)");
+        logger.log_table_start(
+            i + 1,
+            tables.len(),
+            &t.schema_name,
+            &t.table_name,
+            "ANALYZE (STALE STATS)",
+        );
         let start = Instant::now();
         match analyze_table(client, &t.schema_name, &t.table_name).await {
             Ok(()) => {
-                logger.log_table_success(&t.schema_name, &t.table_name, "ANALYZE (STALE STATS)", start.elapsed());
+                logger.log_table_success(
+                    &t.schema_name,
+                    &t.table_name,
+                    "ANALYZE (STALE STATS)",
+                    start.elapsed(),
+                );
                 summary.succeeded += 1;
             }
             Err(e) => {
@@ -949,7 +1074,12 @@ pub async fn run_stale_stats_analyze(
                     );
                     summary.skipped += 1;
                 } else {
-                    logger.log_table_failed(&t.schema_name, &t.table_name, "ANALYZE (STALE STATS)", &e.to_string());
+                    logger.log_table_failed(
+                        &t.schema_name,
+                        &t.table_name,
+                        "ANALYZE (STALE STATS)",
+                        &e.to_string(),
+                    );
                     summary.failed += 1;
                 }
             }
@@ -968,5 +1098,8 @@ pub async fn discover_all_user_schemas(client: &Client) -> Result<Vec<String>> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to discover schemas: {}", e))?;
 
-    Ok(rows.into_iter().map(|row| row.get::<_, String>(0)).collect())
+    Ok(rows
+        .into_iter()
+        .map(|row| row.get::<_, String>(0))
+        .collect())
 }

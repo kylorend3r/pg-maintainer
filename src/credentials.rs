@@ -52,8 +52,7 @@ pub fn get_password_from_pgpass(
         }
 
         let host_matches = parts[0].is_empty() || parts[0] == "*" || parts[0] == host;
-        let port_matches =
-            parts[1].is_empty() || parts[1] == "*" || parts[1] == port.to_string();
+        let port_matches = parts[1].is_empty() || parts[1] == "*" || parts[1] == port.to_string();
         let db_matches = parts[2].is_empty() || parts[2] == "*" || parts[2] == database;
         let user_matches = parts[3].is_empty() || parts[3] == "*" || parts[3] == username;
 

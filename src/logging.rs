@@ -251,10 +251,7 @@ impl Logger {
     }
 
     pub fn log_table_failed(&self, schema: &str, table: &str, op: &str, reason: &str) {
-        let msg = format!(
-            "Failed {} on \"{}\".\"{}\" — {}",
-            op, schema, table, reason
-        );
+        let msg = format!("Failed {} on \"{}\".\"{}\" — {}", op, schema, table, reason);
         self.log_with_context(
             LogLevel::Error,
             &msg,
@@ -278,7 +275,10 @@ impl Drop for Logger {
         };
         if let Some(mut writer) = guard.take() {
             if let Err(e) = writer.flush() {
-                eprintln!("Failed to flush log file '{}' on shutdown: {}", self.log_file, e);
+                eprintln!(
+                    "Failed to flush log file '{}' on shutdown: {}",
+                    self.log_file, e
+                );
             }
         }
     }

@@ -1,10 +1,12 @@
-use pg_maintainer::config::{DEFAULT_BLOAT_THRESHOLD_PCT, DEFAULT_MAINTENANCE_WORK_MEM_GB, DEFAULT_WRAPAROUND_MIN_AGE};
+use anyhow::{Context, Result};
+use clap::Parser;
+use pg_maintainer::config::{
+    DEFAULT_BLOAT_THRESHOLD_PCT, DEFAULT_MAINTENANCE_WORK_MEM_GB, DEFAULT_WRAPAROUND_MIN_AGE,
+};
 use pg_maintainer::connection::{self, ConnectionConfig};
 use pg_maintainer::logging::{LogLevel, Logger};
 use pg_maintainer::operations;
 use pg_maintainer::types::{LogFormat, Mode, SslMode};
-use anyhow::{Context, Result};
-use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
@@ -69,7 +71,11 @@ struct Args {
     // ── Mode selection ───────────────────────────────────────────────────────
     /// Comma-separated modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats.
     /// Defaults to all five when omitted.
-    #[arg(long, value_delimiter = ',', help = "Modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats")]
+    #[arg(
+        long,
+        value_delimiter = ',',
+        help = "Modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats"
+    )]
     mode: Option<Vec<String>>,
 
     /// Terminate a conflicting manual VACUUM before starting (autovacuum workers are always terminated automatically).
@@ -89,21 +95,35 @@ struct Args {
     // ── Stale-stats tuning ───────────────────────────────────────────────────
     /// Flat modification-count floor before a table is considered for re-analysis.
     /// Defaults to the connected server's autovacuum_analyze_threshold if omitted.
-    #[arg(long, help = "Modification-count floor for stale-stats (default: read from server's autovacuum_analyze_threshold)")]
+    #[arg(
+        long,
+        help = "Modification-count floor for stale-stats (default: read from server's autovacuum_analyze_threshold)"
+    )]
     analyze_threshold: Option<i64>,
 
     /// Scale factor applied to live row count when computing the re-analyze threshold.
     /// Defaults to the connected server's autovacuum_analyze_scale_factor if omitted.
-    #[arg(long, help = "Scale factor for stale-stats (default: read from server's autovacuum_analyze_scale_factor)")]
+    #[arg(
+        long,
+        help = "Scale factor for stale-stats (default: read from server's autovacuum_analyze_scale_factor)"
+    )]
     analyze_scale_factor: Option<f64>,
 
     // ── Size filtering ───────────────────────────────────────────────────────
     /// Minimum table size in GB. Tables smaller than this are excluded.
-    #[arg(long, value_name = "GB", help = "Minimum table size in GB (default: 0, no floor)")]
+    #[arg(
+        long,
+        value_name = "GB",
+        help = "Minimum table size in GB (default: 0, no floor)"
+    )]
     min_table_size_gb: Option<f64>,
 
     /// Maximum table size in GB. Tables larger than this are excluded.
-    #[arg(long, value_name = "GB", help = "Maximum table size in GB (default: none, no ceiling)")]
+    #[arg(
+        long,
+        value_name = "GB",
+        help = "Maximum table size in GB (default: none, no ceiling)"
+    )]
     max_table_size_gb: Option<f64>,
 
     // ── Freeze tuning ────────────────────────────────────────────────────────
@@ -138,10 +158,16 @@ struct Args {
     #[arg(long, help = "Path to CA certificate (.pem) for SSL")]
     ssl_ca_cert: Option<String>,
 
-    #[arg(long, help = "Path to client certificate (.pem). Requires --ssl-client-key.")]
+    #[arg(
+        long,
+        help = "Path to client certificate (.pem). Requires --ssl-client-key."
+    )]
     ssl_client_cert: Option<String>,
 
-    #[arg(long, help = "Path to client private key (.pem). Requires --ssl-client-cert.")]
+    #[arg(
+        long,
+        help = "Path to client private key (.pem). Requires --ssl-client-cert."
+    )]
     ssl_client_key: Option<String>,
 
     // ── Logging ──────────────────────────────────────────────────────────────
@@ -233,62 +259,118 @@ fn load_config_file(path: &str) -> Result<Config> {
 
 /// Merge TOML config into args. CLI args always win (only fill in unset fields).
 fn merge_config(file: Config, mut args: Args) -> Args {
-    if args.host.is_none() { args.host = file.host; }
-    if args.port.is_none() { args.port = file.port; }
-    if args.database.is_none() { args.database = file.database; }
-    if args.username.is_none() { args.username = file.username; }
-    if args.password.is_none() { args.password = file.password; }
-    if args.schema.is_none() { args.schema = file.schema; }
+    if args.host.is_none() {
+        args.host = file.host;
+    }
+    if args.port.is_none() {
+        args.port = file.port;
+    }
+    if args.database.is_none() {
+        args.database = file.database;
+    }
+    if args.username.is_none() {
+        args.username = file.username;
+    }
+    if args.password.is_none() {
+        args.password = file.password;
+    }
+    if args.schema.is_none() {
+        args.schema = file.schema;
+    }
 
     if !args.discover_all_schemas {
         args.discover_all_schemas = file.discover_all_schemas.unwrap_or(false);
     }
-    if args.table.is_none() { args.table = file.table; }
-    if !args.dry_run { args.dry_run = file.dry_run.unwrap_or(false); }
-    if args.mode.is_none() { args.mode = file.mode; }
-    if !args.force { args.force = file.force.unwrap_or(false); }
-    if args.limit.is_none() { args.limit = file.limit; }
+    if args.table.is_none() {
+        args.table = file.table;
+    }
+    if !args.dry_run {
+        args.dry_run = file.dry_run.unwrap_or(false);
+    }
+    if args.mode.is_none() {
+        args.mode = file.mode;
+    }
+    if !args.force {
+        args.force = file.force.unwrap_or(false);
+    }
+    if args.limit.is_none() {
+        args.limit = file.limit;
+    }
 
     if args.bloat_threshold_pct == DEFAULT_BLOAT_THRESHOLD_PCT {
-        if let Some(v) = file.bloat_threshold_pct { args.bloat_threshold_pct = v; }
+        if let Some(v) = file.bloat_threshold_pct {
+            args.bloat_threshold_pct = v;
+        }
     }
-    if args.analyze_threshold.is_none() { args.analyze_threshold = file.analyze_threshold; }
-    if args.analyze_scale_factor.is_none() { args.analyze_scale_factor = file.analyze_scale_factor; }
-    if args.min_table_size_gb.is_none() { args.min_table_size_gb = file.min_table_size_gb; }
-    if args.max_table_size_gb.is_none() { args.max_table_size_gb = file.max_table_size_gb; }
+    if args.analyze_threshold.is_none() {
+        args.analyze_threshold = file.analyze_threshold;
+    }
+    if args.analyze_scale_factor.is_none() {
+        args.analyze_scale_factor = file.analyze_scale_factor;
+    }
+    if args.min_table_size_gb.is_none() {
+        args.min_table_size_gb = file.min_table_size_gb;
+    }
+    if args.max_table_size_gb.is_none() {
+        args.max_table_size_gb = file.max_table_size_gb;
+    }
 
     if args.wraparound_min_age == DEFAULT_WRAPAROUND_MIN_AGE {
-        if let Some(v) = file.wraparound_min_age { args.wraparound_min_age = v; }
+        if let Some(v) = file.wraparound_min_age {
+            args.wraparound_min_age = v;
+        }
     }
-    if args.wraparound_pct.is_none() { args.wraparound_pct = file.wraparound_pct; }
+    if args.wraparound_pct.is_none() {
+        args.wraparound_pct = file.wraparound_pct;
+    }
     if args.maintenance_work_mem_gb == DEFAULT_MAINTENANCE_WORK_MEM_GB {
-        if let Some(v) = file.maintenance_work_mem_gb { args.maintenance_work_mem_gb = v; }
+        if let Some(v) = file.maintenance_work_mem_gb {
+            args.maintenance_work_mem_gb = v;
+        }
     }
 
     if args.sslmode == SslMode::Disable {
         if let Some(ref s) = file.sslmode {
-            if let Ok(m) = s.parse::<SslMode>() { args.sslmode = m; }
+            if let Ok(m) = s.parse::<SslMode>() {
+                args.sslmode = m;
+            }
         }
     }
-    if args.ssl_ca_cert.is_none() { args.ssl_ca_cert = file.ssl_ca_cert; }
-    if args.ssl_client_cert.is_none() { args.ssl_client_cert = file.ssl_client_cert; }
-    if args.ssl_client_key.is_none() { args.ssl_client_key = file.ssl_client_key; }
+    if args.ssl_ca_cert.is_none() {
+        args.ssl_ca_cert = file.ssl_ca_cert;
+    }
+    if args.ssl_client_cert.is_none() {
+        args.ssl_client_cert = file.ssl_client_cert;
+    }
+    if args.ssl_client_key.is_none() {
+        args.ssl_client_key = file.ssl_client_key;
+    }
 
     if args.log_file == "maintainer.log" {
-        if let Some(lf) = file.log_file { args.log_file = lf; }
+        if let Some(lf) = file.log_file {
+            args.log_file = lf;
+        }
     }
     if args.log_format == LogFormat::Text {
         if let Some(ref lf) = file.log_format {
-            if let Ok(f) = lf.parse::<LogFormat>() { args.log_format = f; }
+            if let Ok(f) = lf.parse::<LogFormat>() {
+                args.log_format = f;
+            }
         }
     }
-    if !args.silence_mode { args.silence_mode = file.silence_mode.unwrap_or(false); }
+    if !args.silence_mode {
+        args.silence_mode = file.silence_mode.unwrap_or(false);
+    }
 
     if args.statement_timeout_seconds == 0 {
-        if let Some(v) = file.statement_timeout_seconds { args.statement_timeout_seconds = v; }
+        if let Some(v) = file.statement_timeout_seconds {
+            args.statement_timeout_seconds = v;
+        }
     }
     if args.connect_timeout_seconds == 10 {
-        if let Some(v) = file.connect_timeout_seconds { args.connect_timeout_seconds = v; }
+        if let Some(v) = file.connect_timeout_seconds {
+            args.connect_timeout_seconds = v;
+        }
     }
 
     args
@@ -325,7 +407,8 @@ async fn main() -> Result<()> {
     let enabled_modes: HashSet<Mode> = if let Some(ref mode_strs) = args.mode {
         let mut modes = HashSet::new();
         for mode_str in mode_strs {
-            let mode: Mode = mode_str.parse()
+            let mode: Mode = mode_str
+                .parse()
                 .map_err(|e: String| anyhow::anyhow!("Invalid mode: {}", e))?;
             modes.insert(mode);
         }
@@ -334,10 +417,16 @@ async fn main() -> Result<()> {
         }
         modes
     } else {
-        [Mode::NeverVacuumed, Mode::NeverAnalyzed, Mode::Wraparound, Mode::Bloated, Mode::StaleStats]
-            .iter()
-            .copied()
-            .collect()
+        [
+            Mode::NeverVacuumed,
+            Mode::NeverAnalyzed,
+            Mode::Wraparound,
+            Mode::Bloated,
+            Mode::StaleStats,
+        ]
+        .iter()
+        .copied()
+        .collect()
     };
 
     // Validate --limit
@@ -350,12 +439,18 @@ async fn main() -> Result<()> {
     // Validate --analyze-threshold and --analyze-scale-factor
     if let Some(threshold) = args.analyze_threshold {
         if threshold < 0 {
-            return Err(anyhow::anyhow!("--analyze-threshold ({}) must be >= 0", threshold));
+            return Err(anyhow::anyhow!(
+                "--analyze-threshold ({}) must be >= 0",
+                threshold
+            ));
         }
     }
     if let Some(factor) = args.analyze_scale_factor {
         if factor < 0.0 {
-            return Err(anyhow::anyhow!("--analyze-scale-factor ({}) must be >= 0.0", factor));
+            return Err(anyhow::anyhow!(
+                "--analyze-scale-factor ({}) must be >= 0.0",
+                factor
+            ));
         }
     }
 
@@ -378,7 +473,8 @@ async fn main() -> Result<()> {
     if min_gb > max_gb && max_gb != f64::INFINITY {
         return Err(anyhow::anyhow!(
             "--min-table-size-gb ({}) must be <= --max-table-size-gb ({})",
-            min_gb, max_gb
+            min_gb,
+            max_gb
         ));
     }
     let min_bytes = (min_gb * 1_073_741_824.0) as i64;
@@ -523,7 +619,10 @@ async fn main() -> Result<()> {
         .context("Failed to acquire concurrency guard")?;
     logger.log(
         LogLevel::Info,
-        &format!("Acquired advisory lock for schema(s): {}", schemas.join(", ")),
+        &format!(
+            "Acquired advisory lock for schema(s): {}",
+            schemas.join(", ")
+        ),
     );
 
     // Set maintenance_work_mem
@@ -594,7 +693,10 @@ async fn main() -> Result<()> {
     if let Some(tbl) = table_filter {
         logger.log(
             LogLevel::Info,
-            &format!("Table filter active — limiting all phases to table \"{}\"", tbl),
+            &format!(
+                "Table filter active — limiting all phases to table \"{}\"",
+                tbl
+            ),
         );
     }
 
@@ -623,16 +725,33 @@ async fn main() -> Result<()> {
     // ── Phase 1: VACUUM never-vacuumed tables ─────────────────────────────────
     let vacuum_summary = if enabled_modes.contains(&Mode::NeverVacuumed) {
         logger.log(LogLevel::Info, "═══ Phase 1: VACUUM (never vacuumed) ═══");
-        logger.log(LogLevel::Info, "Searching for tables that have never been vacuumed...");
-        let candidates = operations::find_never_vacuumed(&client, &schemas, table_filter, min_bytes, max_bytes, limit_n)
-            .await
-            .context("Failed to query never-vacuumed tables")?;
+        logger.log(
+            LogLevel::Info,
+            "Searching for tables that have never been vacuumed...",
+        );
+        let candidates = operations::find_never_vacuumed(
+            &client,
+            &schemas,
+            table_filter,
+            min_bytes,
+            max_bytes,
+            limit_n,
+        )
+        .await
+        .context("Failed to query never-vacuumed tables")?;
         for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
         }
-        operations::run_vacuum_never_vacuumed(&client, &candidates, args.dry_run, args.force, &logger, &mut shutdown_rx)
-            .await
-            .context("VACUUM phase failed")?
+        operations::run_vacuum_never_vacuumed(
+            &client,
+            &candidates,
+            args.dry_run,
+            args.force,
+            &logger,
+            &mut shutdown_rx,
+        )
+        .await
+        .context("VACUUM phase failed")?
     } else {
         logger.log(LogLevel::Info, "Skipping Phase 1: VACUUM (not in --mode)");
         Default::default()
@@ -641,16 +760,33 @@ async fn main() -> Result<()> {
     // ── Phase 2: ANALYZE never-analyzed tables ────────────────────────────────
     let analyze_summary = if enabled_modes.contains(&Mode::NeverAnalyzed) {
         logger.log(LogLevel::Info, "═══ Phase 2: ANALYZE (never analyzed) ═══");
-        logger.log(LogLevel::Info, "Searching for tables that have never been analyzed...");
-        let candidates = operations::find_never_analyzed(&client, &schemas, table_filter, min_bytes, max_bytes, limit_n)
-            .await
-            .context("Failed to query never-analyzed tables")?;
+        logger.log(
+            LogLevel::Info,
+            "Searching for tables that have never been analyzed...",
+        );
+        let candidates = operations::find_never_analyzed(
+            &client,
+            &schemas,
+            table_filter,
+            min_bytes,
+            max_bytes,
+            limit_n,
+        )
+        .await
+        .context("Failed to query never-analyzed tables")?;
         for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
         }
-        operations::run_analyze_never_analyzed(&client, &candidates, args.dry_run, args.force, &logger, &mut shutdown_rx)
-            .await
-            .context("ANALYZE phase failed")?
+        operations::run_analyze_never_analyzed(
+            &client,
+            &candidates,
+            args.dry_run,
+            args.force,
+            &logger,
+            &mut shutdown_rx,
+        )
+        .await
+        .context("ANALYZE phase failed")?
     } else {
         logger.log(LogLevel::Info, "Skipping Phase 2: ANALYZE (not in --mode)");
         Default::default()
@@ -662,24 +798,48 @@ async fn main() -> Result<()> {
             LogLevel::Info,
             "═══ Phase 3: VACUUM FREEZE (wraparound candidates) ═══",
         );
-        let candidates = operations::find_wraparound_candidates(&client, &schemas, effective_wraparound_min_age, table_filter, min_bytes, max_bytes, limit_n)
-            .await
-            .context("Failed to query wraparound candidates")?;
+        let candidates = operations::find_wraparound_candidates(
+            &client,
+            &schemas,
+            effective_wraparound_min_age,
+            table_filter,
+            min_bytes,
+            max_bytes,
+            limit_n,
+        )
+        .await
+        .context("Failed to query wraparound candidates")?;
         for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
         }
-        operations::run_freeze_wraparound(&client, &candidates, args.dry_run, args.force, &logger, &mut shutdown_rx)
-            .await
-            .context("VACUUM FREEZE phase failed")?
+        operations::run_freeze_wraparound(
+            &client,
+            &candidates,
+            args.dry_run,
+            args.force,
+            &logger,
+            &mut shutdown_rx,
+        )
+        .await
+        .context("VACUUM FREEZE phase failed")?
     } else {
-        logger.log(LogLevel::Info, "Skipping Phase 3: VACUUM FREEZE (not in --mode)");
+        logger.log(
+            LogLevel::Info,
+            "Skipping Phase 3: VACUUM FREEZE (not in --mode)",
+        );
         Default::default()
     };
 
     // ── Phase 4: VACUUM bloat candidates ─────────────────────────────────────
     let bloat_summary = if enabled_modes.contains(&Mode::Bloated) {
         logger.log(LogLevel::Info, "═══ Phase 4: VACUUM (bloat) ═══");
-        logger.log(LogLevel::Info, &format!("Searching for bloat candidates (>{:.1}% dead tuples)...", args.bloat_threshold_pct));
+        logger.log(
+            LogLevel::Info,
+            &format!(
+                "Searching for bloat candidates (>{:.1}% dead tuples)...",
+                args.bloat_threshold_pct
+            ),
+        );
         let candidates = operations::find_bloat_candidates(
             &client,
             &schemas,
@@ -708,7 +868,10 @@ async fn main() -> Result<()> {
         }
         summary
     } else {
-        logger.log(LogLevel::Info, "Skipping Phase 4: VACUUM (bloat) (not in --mode)");
+        logger.log(
+            LogLevel::Info,
+            "Skipping Phase 4: VACUUM (bloat) (not in --mode)",
+        );
         Default::default()
     };
 
@@ -736,8 +899,11 @@ async fn main() -> Result<()> {
                     )
                 }
             };
-        let effective_analyze_threshold = args.analyze_threshold.unwrap_or(server_analyze_threshold);
-        let effective_analyze_scale_factor = args.analyze_scale_factor.unwrap_or(server_analyze_scale_factor);
+        let effective_analyze_threshold =
+            args.analyze_threshold.unwrap_or(server_analyze_threshold);
+        let effective_analyze_scale_factor = args
+            .analyze_scale_factor
+            .unwrap_or(server_analyze_scale_factor);
         logger.log(
             LogLevel::Info,
             &format!(
@@ -751,7 +917,8 @@ async fn main() -> Result<()> {
             LogLevel::Info,
             &format!(
                 "Searching for stale-stats candidates (modifications > {} + {:.2}% × live rows)...",
-                effective_analyze_threshold, effective_analyze_scale_factor * 100.0
+                effective_analyze_threshold,
+                effective_analyze_scale_factor * 100.0
             ),
         );
         let candidates = operations::find_stale_stats_candidates(
@@ -784,18 +951,30 @@ async fn main() -> Result<()> {
         }
         summary
     } else {
-        logger.log(LogLevel::Info, "Skipping Phase 5: ANALYZE (stale stats) (not in --mode)");
+        logger.log(
+            LogLevel::Info,
+            "Skipping Phase 5: ANALYZE (stale stats) (not in --mode)",
+        );
         Default::default()
     };
 
     // ── Final summary ─────────────────────────────────────────────────────────
     let elapsed = start.elapsed();
-    let total_tables =
-        vacuum_summary.total + analyze_summary.total + freeze_summary.total + bloat_summary.total + stale_stats_summary.total;
-    let total_ok =
-        vacuum_summary.succeeded + analyze_summary.succeeded + freeze_summary.succeeded + bloat_summary.succeeded + stale_stats_summary.succeeded;
-    let total_fail =
-        vacuum_summary.failed + analyze_summary.failed + freeze_summary.failed + bloat_summary.failed + stale_stats_summary.failed;
+    let total_tables = vacuum_summary.total
+        + analyze_summary.total
+        + freeze_summary.total
+        + bloat_summary.total
+        + stale_stats_summary.total;
+    let total_ok = vacuum_summary.succeeded
+        + analyze_summary.succeeded
+        + freeze_summary.succeeded
+        + bloat_summary.succeeded
+        + stale_stats_summary.succeeded;
+    let total_fail = vacuum_summary.failed
+        + analyze_summary.failed
+        + freeze_summary.failed
+        + bloat_summary.failed
+        + stale_stats_summary.failed;
 
     logger.log_always(
         LogLevel::Success,
@@ -811,7 +990,10 @@ async fn main() -> Result<()> {
             LogLevel::Info,
             &format!(
                 "  VACUUM        — total: {}, ok: {}, failed: {}, skipped: {}",
-                vacuum_summary.total, vacuum_summary.succeeded, vacuum_summary.failed, vacuum_summary.skipped
+                vacuum_summary.total,
+                vacuum_summary.succeeded,
+                vacuum_summary.failed,
+                vacuum_summary.skipped
             ),
         );
     }
@@ -820,7 +1002,10 @@ async fn main() -> Result<()> {
             LogLevel::Info,
             &format!(
                 "  ANALYZE       — total: {}, ok: {}, failed: {}, skipped: {}",
-                analyze_summary.total, analyze_summary.succeeded, analyze_summary.failed, analyze_summary.skipped
+                analyze_summary.total,
+                analyze_summary.succeeded,
+                analyze_summary.failed,
+                analyze_summary.skipped
             ),
         );
     }
@@ -829,7 +1014,10 @@ async fn main() -> Result<()> {
             LogLevel::Info,
             &format!(
                 "  VACUUM FREEZE — total: {}, ok: {}, failed: {}, skipped: {}",
-                freeze_summary.total, freeze_summary.succeeded, freeze_summary.failed, freeze_summary.skipped
+                freeze_summary.total,
+                freeze_summary.succeeded,
+                freeze_summary.failed,
+                freeze_summary.skipped
             ),
         );
     }
@@ -838,7 +1026,10 @@ async fn main() -> Result<()> {
             LogLevel::Info,
             &format!(
                 "  VACUUM (bloat) — total: {}, ok: {}, failed: {}, skipped: {}",
-                bloat_summary.total, bloat_summary.succeeded, bloat_summary.failed, bloat_summary.skipped
+                bloat_summary.total,
+                bloat_summary.succeeded,
+                bloat_summary.failed,
+                bloat_summary.skipped
             ),
         );
     }
@@ -847,7 +1038,10 @@ async fn main() -> Result<()> {
             LogLevel::Info,
             &format!(
                 "  ANALYZE (stats) — total: {}, ok: {}, failed: {}, skipped: {}",
-                stale_stats_summary.total, stale_stats_summary.succeeded, stale_stats_summary.failed, stale_stats_summary.skipped
+                stale_stats_summary.total,
+                stale_stats_summary.succeeded,
+                stale_stats_summary.failed,
+                stale_stats_summary.skipped
             ),
         );
     }

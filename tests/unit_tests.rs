@@ -3,7 +3,9 @@
 
 use pg_maintainer::credentials::get_password_from_pgpass;
 use pg_maintainer::queries;
-use pg_maintainer::types::{BloatTableInfo, FreezeTableInfo, LogFormat, Mode, OperationSummary, SslMode, TableInfo};
+use pg_maintainer::types::{
+    BloatTableInfo, FreezeTableInfo, LogFormat, Mode, OperationSummary, SslMode, TableInfo,
+};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use tempfile::Builder;
@@ -15,7 +17,10 @@ fn test_sslmode_from_str_all_variants() {
     assert_eq!("disable".parse::<SslMode>().unwrap(), SslMode::Disable);
     assert_eq!("require".parse::<SslMode>().unwrap(), SslMode::Require);
     assert_eq!("verify-ca".parse::<SslMode>().unwrap(), SslMode::VerifyCa);
-    assert_eq!("verify-full".parse::<SslMode>().unwrap(), SslMode::VerifyFull);
+    assert_eq!(
+        "verify-full".parse::<SslMode>().unwrap(),
+        SslMode::VerifyFull
+    );
 }
 
 #[test]
@@ -23,7 +28,10 @@ fn test_sslmode_from_str_case_insensitive() {
     assert_eq!("DISABLE".parse::<SslMode>().unwrap(), SslMode::Disable);
     assert_eq!("REQUIRE".parse::<SslMode>().unwrap(), SslMode::Require);
     assert_eq!("Verify-CA".parse::<SslMode>().unwrap(), SslMode::VerifyCa);
-    assert_eq!("VERIFY-FULL".parse::<SslMode>().unwrap(), SslMode::VerifyFull);
+    assert_eq!(
+        "VERIFY-FULL".parse::<SslMode>().unwrap(),
+        SslMode::VerifyFull
+    );
 }
 
 #[test]
@@ -158,55 +166,82 @@ fn test_operation_summary_default_is_zero() {
 
 #[test]
 fn test_find_never_vacuumed_uses_any_cast() {
-    assert!(queries::FIND_NEVER_VACUUMED.contains("= ANY($1::text[])"),
-        "FIND_NEVER_VACUUMED must use explicit ::text[] cast");
+    assert!(
+        queries::FIND_NEVER_VACUUMED.contains("= ANY($1::text[])"),
+        "FIND_NEVER_VACUUMED must use explicit ::text[] cast"
+    );
 }
 
 #[test]
 fn test_find_never_vacuumed_table_uses_any_cast() {
-    assert!(queries::FIND_NEVER_VACUUMED_TABLE.contains("= ANY($1::text[])"),
-        "FIND_NEVER_VACUUMED_TABLE must use explicit ::text[] cast");
-    assert!(queries::FIND_NEVER_VACUUMED_TABLE.contains("$2"),
-        "FIND_NEVER_VACUUMED_TABLE must bind table name as $2");
+    assert!(
+        queries::FIND_NEVER_VACUUMED_TABLE.contains("= ANY($1::text[])"),
+        "FIND_NEVER_VACUUMED_TABLE must use explicit ::text[] cast"
+    );
+    assert!(
+        queries::FIND_NEVER_VACUUMED_TABLE.contains("$2"),
+        "FIND_NEVER_VACUUMED_TABLE must bind table name as $2"
+    );
 }
 
 #[test]
 fn test_find_never_analyzed_uses_any_cast() {
-    assert!(queries::FIND_NEVER_ANALYZED.contains("= ANY($1::text[])"),
-        "FIND_NEVER_ANALYZED must use explicit ::text[] cast");
+    assert!(
+        queries::FIND_NEVER_ANALYZED.contains("= ANY($1::text[])"),
+        "FIND_NEVER_ANALYZED must use explicit ::text[] cast"
+    );
 }
 
 #[test]
 fn test_find_never_analyzed_table_uses_any_cast() {
-    assert!(queries::FIND_NEVER_ANALYZED_TABLE.contains("= ANY($1::text[])"),
-        "FIND_NEVER_ANALYZED_TABLE must use explicit ::text[] cast");
-    assert!(queries::FIND_NEVER_ANALYZED_TABLE.contains("$2"),
-        "FIND_NEVER_ANALYZED_TABLE must bind table name as $2");
+    assert!(
+        queries::FIND_NEVER_ANALYZED_TABLE.contains("= ANY($1::text[])"),
+        "FIND_NEVER_ANALYZED_TABLE must use explicit ::text[] cast"
+    );
+    assert!(
+        queries::FIND_NEVER_ANALYZED_TABLE.contains("$2"),
+        "FIND_NEVER_ANALYZED_TABLE must bind table name as $2"
+    );
 }
 
 #[test]
 fn test_find_wraparound_candidates_uses_any_cast() {
-    assert!(queries::FIND_WRAPAROUND_CANDIDATES.contains("= ANY($1::text[])"),
-        "FIND_WRAPAROUND_CANDIDATES must use explicit ::text[] cast");
+    assert!(
+        queries::FIND_WRAPAROUND_CANDIDATES.contains("= ANY($1::text[])"),
+        "FIND_WRAPAROUND_CANDIDATES must use explicit ::text[] cast"
+    );
 }
 
 #[test]
 fn test_find_wraparound_candidates_table_uses_any_cast() {
-    assert!(queries::FIND_WRAPAROUND_CANDIDATES_TABLE.contains("= ANY($1::text[])"),
-        "FIND_WRAPAROUND_CANDIDATES_TABLE must use explicit ::text[] cast");
-    assert!(queries::FIND_WRAPAROUND_CANDIDATES_TABLE.contains("$3"),
-        "FIND_WRAPAROUND_CANDIDATES_TABLE must bind table name as $3");
+    assert!(
+        queries::FIND_WRAPAROUND_CANDIDATES_TABLE.contains("= ANY($1::text[])"),
+        "FIND_WRAPAROUND_CANDIDATES_TABLE must use explicit ::text[] cast"
+    );
+    assert!(
+        queries::FIND_WRAPAROUND_CANDIDATES_TABLE.contains("$3"),
+        "FIND_WRAPAROUND_CANDIDATES_TABLE must bind table name as $3"
+    );
 }
 
 #[test]
 fn test_partition_excluding_queries_all_filter_relkind_p() {
     let queries_to_check = [
         ("FIND_NEVER_VACUUMED", queries::FIND_NEVER_VACUUMED),
-        ("FIND_NEVER_VACUUMED_TABLE", queries::FIND_NEVER_VACUUMED_TABLE),
+        (
+            "FIND_NEVER_VACUUMED_TABLE",
+            queries::FIND_NEVER_VACUUMED_TABLE,
+        ),
         ("FIND_NEVER_ANALYZED", queries::FIND_NEVER_ANALYZED),
-        ("FIND_NEVER_ANALYZED_TABLE", queries::FIND_NEVER_ANALYZED_TABLE),
+        (
+            "FIND_NEVER_ANALYZED_TABLE",
+            queries::FIND_NEVER_ANALYZED_TABLE,
+        ),
         ("FIND_BLOAT_CANDIDATES", queries::FIND_BLOAT_CANDIDATES),
-        ("FIND_BLOAT_CANDIDATES_TABLE", queries::FIND_BLOAT_CANDIDATES_TABLE),
+        (
+            "FIND_BLOAT_CANDIDATES_TABLE",
+            queries::FIND_BLOAT_CANDIDATES_TABLE,
+        ),
         ("FIND_STALE_STATS", queries::FIND_STALE_STATS),
         ("FIND_STALE_STATS_TABLE", queries::FIND_STALE_STATS_TABLE),
     ];
@@ -223,8 +258,14 @@ fn test_partition_excluding_queries_all_filter_relkind_p() {
 
 #[test]
 fn test_mode_from_str_all_variants() {
-    assert_eq!("never-vacuumed".parse::<Mode>().unwrap(), Mode::NeverVacuumed);
-    assert_eq!("never-analyzed".parse::<Mode>().unwrap(), Mode::NeverAnalyzed);
+    assert_eq!(
+        "never-vacuumed".parse::<Mode>().unwrap(),
+        Mode::NeverVacuumed
+    );
+    assert_eq!(
+        "never-analyzed".parse::<Mode>().unwrap(),
+        Mode::NeverAnalyzed
+    );
     assert_eq!("wraparound".parse::<Mode>().unwrap(), Mode::Wraparound);
     assert_eq!("bloated".parse::<Mode>().unwrap(), Mode::Bloated);
     assert_eq!("stale-stats".parse::<Mode>().unwrap(), Mode::StaleStats);
@@ -232,8 +273,14 @@ fn test_mode_from_str_all_variants() {
 
 #[test]
 fn test_mode_from_str_case_insensitive() {
-    assert_eq!("NEVER-VACUUMED".parse::<Mode>().unwrap(), Mode::NeverVacuumed);
-    assert_eq!("Never-Analyzed".parse::<Mode>().unwrap(), Mode::NeverAnalyzed);
+    assert_eq!(
+        "NEVER-VACUUMED".parse::<Mode>().unwrap(),
+        Mode::NeverVacuumed
+    );
+    assert_eq!(
+        "Never-Analyzed".parse::<Mode>().unwrap(),
+        Mode::NeverAnalyzed
+    );
     assert_eq!("WRAPAROUND".parse::<Mode>().unwrap(), Mode::Wraparound);
     assert_eq!("Bloated".parse::<Mode>().unwrap(), Mode::Bloated);
 }
@@ -263,7 +310,7 @@ fn test_bloat_table_info_pct_bloat_full_bloat() {
         schema_name: "public".to_string(),
         table_name: "test".to_string(),
         n_live_tup: 100,
-        n_dead_tup: 400,  // 80% bloat
+        n_dead_tup: 400, // 80% bloat
     };
     assert_eq!(info.pct_bloat(), 80.0);
 }
@@ -296,29 +343,37 @@ fn test_bloat_table_info_pct_bloat_empty_table() {
         schema_name: "public".to_string(),
         table_name: "test".to_string(),
         n_live_tup: 0,
-        n_dead_tup: 0,  // Empty table
+        n_dead_tup: 0, // Empty table
     };
     assert_eq!(info.pct_bloat(), 0.0);
 }
 
 #[test]
 fn test_wraparound_query_includes_toast_tables() {
-    assert!(queries::FIND_WRAPAROUND_CANDIDATES.contains("'t'"),
-        "wraparound query must include TOAST tables (relkind 't')");
+    assert!(
+        queries::FIND_WRAPAROUND_CANDIDATES.contains("'t'"),
+        "wraparound query must include TOAST tables (relkind 't')"
+    );
 }
 
 #[test]
 fn test_wraparound_query_includes_materialized_views() {
-    assert!(queries::FIND_WRAPAROUND_CANDIDATES.contains("'m'"),
-        "wraparound query must include materialized views (relkind 'm')");
+    assert!(
+        queries::FIND_WRAPAROUND_CANDIDATES.contains("'m'"),
+        "wraparound query must include materialized views (relkind 'm')"
+    );
 }
 
 #[test]
 fn test_wraparound_query_excludes_system_schemas() {
-    assert!(queries::FIND_WRAPAROUND_CANDIDATES.contains("'pg_catalog'"),
-        "wraparound query must exclude pg_catalog");
-    assert!(queries::FIND_WRAPAROUND_CANDIDATES.contains("'information_schema'"),
-        "wraparound query must exclude information_schema");
+    assert!(
+        queries::FIND_WRAPAROUND_CANDIDATES.contains("'pg_catalog'"),
+        "wraparound query must exclude pg_catalog"
+    );
+    assert!(
+        queries::FIND_WRAPAROUND_CANDIDATES.contains("'information_schema'"),
+        "wraparound query must exclude information_schema"
+    );
 }
 
 // ── Pgpass credential lookup ───────────────────────────────────────────────────
