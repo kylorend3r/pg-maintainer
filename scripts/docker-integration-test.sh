@@ -120,37 +120,43 @@ main() {
   # Step 6: Dry-run test for each mode
   log_info "Running dry-run tests for each mode..."
 
-  for mode in vacuum analyze freeze bloat; do
+  for mode in never-vacuumed never-analyzed wraparound bloated stale-stats; do
     log_info "Testing mode: ${mode}"
     "${binary}" \
       --discover-all-schemas \
       --mode "${mode}" \
       --wraparound-min-age "${WRAPAROUND_MIN_AGE}" \
       --dry-run \
-      --log-file "logs/mode-${mode}.dry.log" || true
+      --log-file "logs/mode-${mode}.dry.log"
 
     # Validate that appropriate tables appear in dry-run
     case "${mode}" in
-      vacuum)
+      never-vacuumed)
         if ! grep -q "never_maintained\|pgbench_" "logs/mode-${mode}.dry.log"; then
-          log_warn "Expected to find candidate tables in vacuum mode"
+          log_warn "Expected to find candidate tables in never-vacuumed mode"
         fi
         ;;
-      analyze)
+      never-analyzed)
         if ! grep -q "never_maintained\|pgbench_" "logs/mode-${mode}.dry.log"; then
-          log_warn "Expected to find candidate tables in analyze mode"
+          log_warn "Expected to find candidate tables in never-analyzed mode"
         fi
         ;;
-      freeze)
+      wraparound)
         # All tables should appear since we set --wraparound-min-age low
         if [ $(wc -l < "logs/mode-${mode}.dry.log") -lt 5 ]; then
-          log_warn "Expected more output in freeze mode with low wraparound threshold"
+          log_warn "Expected more output in wraparound mode with low wraparound threshold"
         fi
         ;;
-      bloat)
+      bloated)
         # pgbench_branches and pgbench_tellers should show high bloat
         if ! grep -q "pgbench_branches\|pgbench_tellers" "logs/mode-${mode}.dry.log"; then
-          log_warn "Expected pgbench_branches/tellers in bloat mode"
+          log_warn "Expected pgbench_branches/tellers in bloated mode"
+        fi
+        ;;
+      stale-stats)
+        # After pgbench workload, should find candidates
+        if [ $(wc -l < "logs/mode-${mode}.dry.log") -lt 5 ]; then
+          log_warn "Expected some output in stale-stats mode after pgbench workload"
         fi
         ;;
     esac
@@ -162,7 +168,7 @@ main() {
     --discover-all-schemas \
     --wraparound-min-age "${WRAPAROUND_MIN_AGE}" \
     --dry-run \
-    --log-file "logs/full-run.dry.log" || true
+    --log-file "logs/full-run.dry.log"
 
   # Step 8: Post-run dry-run (should be empty or minimal)
   log_info "Running post-maintenance dry-run (should be empty)..."
@@ -170,7 +176,7 @@ main() {
     --discover-all-schemas \
     --wraparound-min-age "${WRAPAROUND_MIN_AGE}" \
     --dry-run \
-    --log-file "logs/post-run.dry.log" || true
+    --log-file "logs/post-run.dry.log"
 
   # Summary
   log_info "Test completed successfully!"

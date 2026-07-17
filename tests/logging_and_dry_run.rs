@@ -217,23 +217,158 @@ fn test_limit_applies_to_wraparound_mode() {
         .stderr(predicate::str::contains("Invalid mode").not());
 }
 
-// ── Integration placeholder (requires live DB) ─────────────────────────────────
+// ── Integration tests (requires live DB) ──────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
 async fn test_dry_run_prevents_actual_maintenance() {
-    // To run: cargo test -- --ignored
-    // 1. Connect to a test DB
-    // 2. Run pg-maintainer with --dry-run
-    // 3. Verify pg_stat_user_tables.last_vacuum / last_analyze are unchanged
-    // 4. Verify log file contains "[DRY RUN] Would run:" entries
-    assert!(true, "placeholder — requires live PostgreSQL");
+    // Run: cargo test -- --include-ignored
+    // 1. Connect to pgm_test database
+    // 2. Create a fresh test table that has never been vacuumed
+    // 3. Record last_vacuum timestamp before
+    // 4. Run pg-maintainer with --dry-run
+    // 5. Verify last_vacuum is unchanged
+    // 6. Verify log file contains "[DRY RUN]" entries
+
+    let conn_str = "host=127.0.0.1 port=5432 user=pgm_test password=pgm_test dbname=pgm_test";
+    let (client, connection) = match tokio_postgres::connect(conn_str, tokio_postgres::NoTls).await {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("Could not connect to test database. Make sure docker-compose up is running.");
+            return;
+        }
+    };
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Connection error: {}", e);
+        }
+    });
+
+    // Set up a fresh test table
+    let _ = client.execute("DROP TABLE IF EXISTS pgm_dry_run_test", &[]).await;
+    let _ = client
+        .execute(
+            "CREATE TABLE pgm_dry_run_test (id bigint, payload text)",
+            &[],
+        )
+        .await;
+    let _ = client
+        .execute(
+            "INSERT INTO pgm_dry_run_test SELECT g, repeat('x', 100) FROM generate_series(1, 1000) g",
+            &[],
+        )
+        .await;
+
+    // Record initial state
+    let row = client
+        .query_one(
+            "SELECT last_vacuum, last_analyze FROM pg_stat_user_tables WHERE relname = 'pgm_dry_run_test'",
+            &[],
+        )
+        .await
+        .expect("Failed to query table stats");
+    let last_vacuum_before: Option<std::time::SystemTime> = row.get(0);
+    let last_analyze_before: Option<std::time::SystemTime> = row.get(1);
+
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("dry_run_test.log");
+
+    // Run pg-maintainer with --dry-run
+    let _output = cmd()
+        .arg("--host").arg("127.0.0.1")
+        .arg("--port").arg("5432")
+        .arg("--database").arg("pgm_test")
+        .arg("--username").arg("pgm_test")
+        .arg("--password").arg("pgm_test")
+        .arg("--schema").arg("public")
+        .arg("--table").arg("pgm_dry_run_test")
+        .arg("--dry-run")
+        .arg("--log-file").arg(log_path.to_str().unwrap())
+        .output()
+        .expect("Failed to run pg-maintainer");
+
+    // Verify log file contains "[DRY RUN]"
+    let log_content = fs::read_to_string(&log_path).unwrap_or_default();
+    assert!(
+        log_content.contains("[DRY RUN]") || log_content.contains("DRY RUN"),
+        "Log should contain '[DRY RUN]' entries"
+    );
+
+    // Verify table was not actually vacuumed
+    let row = client
+        .query_one(
+            "SELECT last_vacuum, last_analyze FROM pg_stat_user_tables WHERE relname = 'pgm_dry_run_test'",
+            &[],
+        )
+        .await
+        .expect("Failed to query table stats after run");
+    let last_vacuum_after: Option<std::time::SystemTime> = row.get(0);
+    let last_analyze_after: Option<std::time::SystemTime> = row.get(1);
+
+    assert_eq!(
+        last_vacuum_before, last_vacuum_after,
+        "last_vacuum should not change in dry-run mode"
+    );
+    assert_eq!(
+        last_analyze_before, last_analyze_after,
+        "last_analyze should not change in dry-run mode"
+    );
+
+    let _ = client.execute("DROP TABLE IF EXISTS pgm_dry_run_test", &[]).await;
 }
 
 #[tokio::test]
 #[ignore]
 async fn test_log_file_json_entries_are_valid_json() {
-    // Run pg-maintainer with --log-format json against a real DB,
-    // then parse each line of the log file as JSON to confirm schema.
-    assert!(true, "placeholder — requires live PostgreSQL");
+    // Run pg-maintainer with --log-format json against test DB,
+    // then verify each line of the log file is valid JSON.
+
+    let conn_str = "host=127.0.0.1 port=5432 user=pgm_test password=pgm_test dbname=pgm_test";
+    let (client, connection) = match tokio_postgres::connect(conn_str, tokio_postgres::NoTls).await {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("Could not connect to test database.");
+            return;
+        }
+    };
+
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("Connection error: {}", e);
+        }
+    });
+
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("json_test.log");
+
+    // Run with --log-format json and --dry-run
+    let _ = cmd()
+        .arg("--host").arg("127.0.0.1")
+        .arg("--port").arg("5432")
+        .arg("--database").arg("pgm_test")
+        .arg("--username").arg("pgm_test")
+        .arg("--password").arg("pgm_test")
+        .arg("--schema").arg("public")
+        .arg("--dry-run")
+        .arg("--log-format").arg("json")
+        .arg("--log-file").arg(log_path.to_str().unwrap())
+        .output();
+
+    // Parse the log file and verify each line is valid JSON
+    if let Ok(log_content) = fs::read_to_string(&log_path) {
+        for line in log_content.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
+            assert!(
+                parsed.is_ok(),
+                "Log line should be valid JSON: {}",
+                line
+            );
+        }
+    }
+
+    let _ = client.query("SELECT 1", &[]).await;
 }
