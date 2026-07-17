@@ -49,6 +49,7 @@ pub struct ConnectionConfig {
     pub ssl_ca_cert: Option<String>,
     pub ssl_client_cert: Option<String>,
     pub ssl_client_key: Option<String>,
+    pub connect_timeout_seconds: u64,
 }
 
 impl ConnectionConfig {
@@ -64,6 +65,7 @@ impl ConnectionConfig {
         ssl_ca_cert: Option<String>,
         ssl_client_cert: Option<String>,
         ssl_client_key: Option<String>,
+        connect_timeout_seconds: u64,
     ) -> Result<Self> {
         let host = host
             .or_else(|| env::var("PG_HOST").ok())
@@ -115,16 +117,18 @@ impl ConnectionConfig {
             ssl_ca_cert,
             ssl_client_cert,
             ssl_client_key,
+            connect_timeout_seconds,
         })
     }
 
     pub fn build_connection_string(&self) -> String {
         let mut s = format!(
-            "host={} port={} dbname={} user={}",
+            "host={} port={} dbname={} user={} connect_timeout={}",
             escape_libpq_value(&self.host),
             self.port,
             escape_libpq_value(&self.database),
             escape_libpq_value(&self.username),
+            self.connect_timeout_seconds,
         );
         if let Some(ref pw) = self.password {
             s.push_str(&format!(" password={}", escape_libpq_value(pw.expose())));
@@ -167,6 +171,7 @@ pub async fn connect(
     ssl_ca_cert: Option<String>,
     ssl_client_cert: Option<String>,
     ssl_client_key: Option<String>,
+    statement_timeout_seconds: u64,
 ) -> Result<tokio_postgres::Client> {
     let client = connect_raw(
         connection_string,
@@ -189,8 +194,13 @@ pub async fn connect(
         ));
     }
 
+    let statement_timeout_sql = if statement_timeout_seconds == 0 {
+        "SET statement_timeout TO 0".to_string()
+    } else {
+        format!("SET statement_timeout TO '{}s'", statement_timeout_seconds)
+    };
     client
-        .execute(crate::queries::SET_STATEMENT_TIMEOUT, &[])
+        .execute(&statement_timeout_sql, &[])
         .await
         .context("Failed to set statement_timeout")?;
     client

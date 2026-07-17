@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::watch;
 
 // ─── CLI args ─────────────────────────────────────────────────────────────────
 
@@ -154,6 +155,17 @@ struct Args {
     #[arg(long, default_value = "false")]
     silence_mode: bool,
 
+    // ── Timeouts ─────────────────────────────────────────────────────────────
+    /// Statement timeout in seconds for each VACUUM/ANALYZE operation (default: 0 = unbounded).
+    /// Set this for unattended runs to prevent VACUUM from running indefinitely if it gets stuck.
+    #[arg(long, default_value = "0")]
+    statement_timeout_seconds: u64,
+
+    /// TCP connection timeout in seconds (default: 10).
+    /// A network partition can hang startup for the OS default; this bounds that.
+    #[arg(long, default_value = "10")]
+    connect_timeout_seconds: u64,
+
     // ── Config file ──────────────────────────────────────────────────────────
     /// Path to a TOML configuration file. CLI arguments take precedence.
     #[arg(short = 'C', long, value_name = "FILE")]
@@ -192,6 +204,8 @@ struct Config {
     log_file: Option<String>,
     log_format: Option<String>,
     silence_mode: Option<bool>,
+    statement_timeout_seconds: Option<u64>,
+    connect_timeout_seconds: Option<u64>,
 }
 
 fn resolve_env_interpolation(value: Option<String>) -> Option<String> {
@@ -269,6 +283,13 @@ fn merge_config(file: Config, mut args: Args) -> Args {
         }
     }
     if !args.silence_mode { args.silence_mode = file.silence_mode.unwrap_or(false); }
+
+    if args.statement_timeout_seconds == 0 {
+        if let Some(v) = file.statement_timeout_seconds { args.statement_timeout_seconds = v; }
+    }
+    if args.connect_timeout_seconds == 10 {
+        if let Some(v) = file.connect_timeout_seconds { args.connect_timeout_seconds = v; }
+    }
 
     args
 }
@@ -399,6 +420,31 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Set up graceful shutdown signal handlers (SIGTERM and Ctrl-C)
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let shutdown_tx_term = shutdown_tx.clone();
+    let shutdown_tx_int = shutdown_tx.clone();
+
+    tokio::spawn(async move {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sigterm) => {
+                sigterm.recv().await;
+                let _ = shutdown_tx_term.send(true);
+            }
+            Err(e) => {
+                eprintln!("Failed to setup SIGTERM handler: {}", e);
+            }
+        }
+    });
+
+    tokio::spawn(async move {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            eprintln!("Failed to setup SIGINT handler: {}", e);
+        } else {
+            let _ = shutdown_tx_int.send(true);
+        }
+    });
+
     // Build connection config
     let conn_cfg = ConnectionConfig::from_args(
         args.host.clone(),
@@ -410,6 +456,7 @@ async fn main() -> Result<()> {
         args.ssl_ca_cert.clone(),
         args.ssl_client_cert.clone(),
         args.ssl_client_key.clone(),
+        args.connect_timeout_seconds,
     )?;
 
     let conn_string = conn_cfg.build_connection_string();
@@ -428,6 +475,7 @@ async fn main() -> Result<()> {
         conn_cfg.ssl_ca_cert.clone(),
         conn_cfg.ssl_client_cert.clone(),
         conn_cfg.ssl_client_key.clone(),
+        args.statement_timeout_seconds,
     )
     .await
     .context("Failed to connect to PostgreSQL")?;
@@ -435,6 +483,47 @@ async fn main() -> Result<()> {
     logger.log(
         LogLevel::Success,
         &format!("Connected to database '{}'", conn_cfg.database),
+    );
+
+    // Resolve schemas early so we can acquire the advisory lock before any maintenance work
+    let schemas: Vec<String> = if args.discover_all_schemas && args.schema.is_none() {
+        logger.log(LogLevel::Info, "Discovering all user schemas...");
+        let discovered = operations::discover_all_user_schemas(&client).await?;
+        if discovered.is_empty() {
+            return Err(anyhow::anyhow!(
+                "No user schemas found. System schemas are excluded."
+            ));
+        }
+        logger.log(
+            LogLevel::Success,
+            &format!(
+                "Discovered {} schema(s): {}",
+                discovered.len(),
+                discovered.join(", ")
+            ),
+        );
+        discovered
+    } else {
+        args.schema
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+
+    if schemas.is_empty() {
+        return Err(anyhow::anyhow!("No schemas to process."));
+    }
+
+    // Try to acquire advisory lock to prevent concurrent pg-maintainer instances
+    operations::try_acquire_schema_lock(&client, &schemas)
+        .await
+        .context("Failed to acquire concurrency guard")?;
+    logger.log(
+        LogLevel::Info,
+        &format!("Acquired advisory lock for schema(s): {}", schemas.join(", ")),
     );
 
     // Set maintenance_work_mem
@@ -494,38 +583,6 @@ async fn main() -> Result<()> {
     // Resolve --limit (default to no limit if not specified)
     let limit_n = args.limit.unwrap_or(i64::MAX);
 
-    // Resolve schemas
-    let schemas: Vec<String> = if args.discover_all_schemas && args.schema.is_none() {
-        logger.log(LogLevel::Info, "Discovering all user schemas...");
-        let discovered = operations::discover_all_user_schemas(&client).await?;
-        if discovered.is_empty() {
-            return Err(anyhow::anyhow!(
-                "No user schemas found. System schemas are excluded."
-            ));
-        }
-        logger.log(
-            LogLevel::Success,
-            &format!(
-                "Discovered {} schema(s): {}",
-                discovered.len(),
-                discovered.join(", ")
-            ),
-        );
-        discovered
-    } else {
-        args.schema
-            .as_deref()
-            .unwrap_or("")
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    };
-
-    if schemas.is_empty() {
-        return Err(anyhow::anyhow!("No schemas to process."));
-    }
-
     if args.dry_run {
         logger.log(
             LogLevel::Warning,
@@ -573,7 +630,7 @@ async fn main() -> Result<()> {
         for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
         }
-        operations::run_vacuum_never_vacuumed(&client, &candidates, args.dry_run, args.force, &logger)
+        operations::run_vacuum_never_vacuumed(&client, &candidates, args.dry_run, args.force, &logger, &mut shutdown_rx)
             .await
             .context("VACUUM phase failed")?
     } else {
@@ -591,7 +648,7 @@ async fn main() -> Result<()> {
         for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
         }
-        operations::run_analyze_never_analyzed(&client, &candidates, args.dry_run, args.force, &logger)
+        operations::run_analyze_never_analyzed(&client, &candidates, args.dry_run, args.force, &logger, &mut shutdown_rx)
             .await
             .context("ANALYZE phase failed")?
     } else {
@@ -611,7 +668,7 @@ async fn main() -> Result<()> {
         for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
         }
-        operations::run_freeze_wraparound(&client, &candidates, args.dry_run, args.force, &logger)
+        operations::run_freeze_wraparound(&client, &candidates, args.dry_run, args.force, &logger, &mut shutdown_rx)
             .await
             .context("VACUUM FREEZE phase failed")?
     } else {
@@ -642,6 +699,7 @@ async fn main() -> Result<()> {
             args.force,
             &already_handled,
             &logger,
+            &mut shutdown_rx,
         )
         .await
         .context("VACUUM BLOAT phase failed")?;
@@ -717,6 +775,7 @@ async fn main() -> Result<()> {
             args.force,
             &already_handled,
             &logger,
+            &mut shutdown_rx,
         )
         .await
         .context("ANALYZE STALE STATS phase failed")?;
@@ -791,6 +850,15 @@ async fn main() -> Result<()> {
                 stale_stats_summary.total, stale_stats_summary.succeeded, stale_stats_summary.failed, stale_stats_summary.skipped
             ),
         );
+    }
+
+    // Exit with code 130 if shutdown was requested (SIGTERM/SIGINT)
+    if *shutdown_rx.borrow() {
+        logger.log_always(
+            LogLevel::Warning,
+            "pg-maintainer was terminated by signal — exiting with code 130",
+        );
+        std::process::exit(130);
     }
 
     if total_fail > 0 {

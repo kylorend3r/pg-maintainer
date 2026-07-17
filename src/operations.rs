@@ -4,7 +4,50 @@ use crate::types::{BloatTableInfo, FreezeTableInfo, OperationSummary, TableInfo}
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::watch;
+use tokio_postgres::error::SqlState;
 use tokio_postgres::Client;
+
+// ─── Concurrency guard ────────────────────────────────────────────────────────
+
+/// Try to acquire a session-scoped advisory lock for the given schema list.
+/// The lock ID is derived from a hash of the concatenated schema names.
+/// Returns Ok(()) if the lock was acquired; Err if another pg-maintainer instance
+/// is already running against these schemas (lock is already held elsewhere).
+/// The lock is automatically released when the connection closes.
+pub async fn try_acquire_schema_lock(client: &Client, schemas: &[String]) -> Result<()> {
+    let schemas_str = schemas.join(",");
+    // Use hashtext() to convert the schema list to a 32-bit hash suitable for advisory locks
+    let row = client
+        .query_one(
+            "SELECT hashtext($1)::int AS lock_id",
+            &[&schemas_str],
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to compute schema lock ID: {}", e))?;
+
+    let lock_id: i32 = row.get("lock_id");
+
+    // pg_try_advisory_lock(int4) returns true if the lock was acquired, false if already held
+    let row = client
+        .query_one(
+            "SELECT pg_try_advisory_lock($1::int) AS acquired",
+            &[&lock_id],
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to acquire advisory lock: {}", e))?;
+
+    let acquired: bool = row.get("acquired");
+    if !acquired {
+        return Err(anyhow::anyhow!(
+            "Another pg-maintainer run is already active on schema(s): {}. \
+             Release the existing lock or wait for the other process to complete.",
+            schemas_str
+        ));
+    }
+
+    Ok(())
+}
 
 // ─── Discovery queries ────────────────────────────────────────────────────────
 
@@ -254,44 +297,44 @@ async fn terminate_backends(client: &Client, pids: &[i32]) -> Result<()> {
 
 // ─── Lock timeout detection ───────────────────────────────────────────────────
 
-/// Returns true when a table operation error was caused by lock_timeout.
-/// PostgreSQL emits "canceling statement due to lock timeout" (SQLSTATE 55P03).
-fn is_lock_timeout(err: &str) -> bool {
-    err.contains("lock timeout")
+/// Returns true when a table operation error was caused by lock_timeout
+/// (SQLSTATE 55P03, "canceling statement due to lock timeout").
+fn is_lock_timeout(err: &tokio_postgres::Error) -> bool {
+    err.code() == Some(&SqlState::LOCK_NOT_AVAILABLE)
 }
 
 // ─── Individual table operations ──────────────────────────────────────────────
 
-async fn vacuum_table(client: &Client, schema: &str, table: &str) -> Result<()> {
-    // Table names originate from pg_catalog — quoting them is sufficient protection.
-    let sql = format!("VACUUM (VERBOSE) \"{}\".\"{}\"", schema, table);
-    client
-        .execute(&sql, &[])
-        .await
-        .map_err(|e| anyhow::anyhow!("VACUUM failed: {}", e))?;
+/// Double any embedded `"` so an identifier can't break out of its quoting.
+fn quote_ident(s: &str) -> String {
+    s.replace('"', "\"\"")
+}
+
+async fn vacuum_table(client: &Client, schema: &str, table: &str) -> Result<(), tokio_postgres::Error> {
+    let sql = format!(
+        "VACUUM (VERBOSE) \"{}\".\"{}\"",
+        quote_ident(schema),
+        quote_ident(table)
+    );
+    client.execute(&sql, &[]).await?;
     Ok(())
 }
 
-async fn analyze_table(client: &Client, schema: &str, table: &str) -> Result<()> {
-    let sql = format!("ANALYZE \"{}\".\"{}\"", schema, table);
-    client
-        .execute(&sql, &[])
-        .await
-        .map_err(|e| anyhow::anyhow!("ANALYZE failed: {}", e))?;
+async fn analyze_table(client: &Client, schema: &str, table: &str) -> Result<(), tokio_postgres::Error> {
+    let sql = format!("ANALYZE \"{}\".\"{}\"", quote_ident(schema), quote_ident(table));
+    client.execute(&sql, &[]).await?;
     Ok(())
 }
 
-async fn freeze_table(client: &Client, schema: &str, table: &str) -> Result<()> {
+async fn freeze_table(client: &Client, schema: &str, table: &str) -> Result<(), tokio_postgres::Error> {
     // INDEX_CLEANUP FALSE avoids index bloat during aggressive freeze passes.
     // VERBOSE surfaces progress notices to the PostgreSQL log.
     let sql = format!(
         "VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE) \"{}\".\"{}\"",
-        schema, table
+        quote_ident(schema),
+        quote_ident(table)
     );
-    client
-        .execute(&sql, &[])
-        .await
-        .map_err(|e| anyhow::anyhow!("VACUUM FREEZE failed: {}", e))?;
+    client.execute(&sql, &[]).await?;
     Ok(())
 }
 
@@ -422,6 +465,7 @@ pub async fn run_vacuum_never_vacuumed(
     dry_run: bool,
     force: bool,
     logger: &Arc<Logger>,
+    shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary::default();
     summary.total = tables.len();
@@ -437,6 +481,14 @@ pub async fn run_vacuum_never_vacuumed(
     );
 
     for (i, t) in tables.iter().enumerate() {
+        // Check if shutdown was requested
+        if *shutdown_rx.borrow() {
+            logger.log(
+                LogLevel::Warning,
+                "Shutdown signal received — stopping after current table.",
+            );
+            break;
+        }
         let proceed = handle_active_vacuums(
             client,
             &t.schema_name,
@@ -471,8 +523,7 @@ pub async fn run_vacuum_never_vacuumed(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                let reason = e.to_string();
-                if is_lock_timeout(&reason) {
+                if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
                         &format!(
@@ -482,7 +533,7 @@ pub async fn run_vacuum_never_vacuumed(
                     );
                     summary.skipped += 1;
                 } else {
-                    logger.log_table_failed(&t.schema_name, &t.table_name, OP_VACUUM, &reason);
+                    logger.log_table_failed(&t.schema_name, &t.table_name, OP_VACUUM, &e.to_string());
                     summary.failed += 1;
                 }
             }
@@ -502,6 +553,7 @@ pub async fn run_analyze_never_analyzed(
     dry_run: bool,
     force: bool,
     logger: &Arc<Logger>,
+    shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary::default();
     summary.total = tables.len();
@@ -517,6 +569,14 @@ pub async fn run_analyze_never_analyzed(
     );
 
     for (i, t) in tables.iter().enumerate() {
+        // Check if shutdown was requested
+        if *shutdown_rx.borrow() {
+            logger.log(
+                LogLevel::Warning,
+                "Shutdown signal received — stopping after current table.",
+            );
+            break;
+        }
         let proceed = handle_active_vacuums(
             client,
             &t.schema_name,
@@ -551,8 +611,7 @@ pub async fn run_analyze_never_analyzed(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                let reason = e.to_string();
-                if is_lock_timeout(&reason) {
+                if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
                         &format!(
@@ -562,7 +621,7 @@ pub async fn run_analyze_never_analyzed(
                     );
                     summary.skipped += 1;
                 } else {
-                    logger.log_table_failed(&t.schema_name, &t.table_name, OP_ANALYZE, &reason);
+                    logger.log_table_failed(&t.schema_name, &t.table_name, OP_ANALYZE, &e.to_string());
                     summary.failed += 1;
                 }
             }
@@ -581,6 +640,7 @@ pub async fn run_freeze_wraparound(
     dry_run: bool,
     force: bool,
     logger: &Arc<Logger>,
+    shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<OperationSummary> {
 
     let mut summary = OperationSummary::default();
@@ -623,6 +683,14 @@ pub async fn run_freeze_wraparound(
     }
 
     for (i, t) in tables.iter().enumerate() {
+        // Check if shutdown was requested
+        if *shutdown_rx.borrow() {
+            logger.log(
+                LogLevel::Warning,
+                "Shutdown signal received — stopping after current table.",
+            );
+            break;
+        }
         let proceed = handle_active_vacuums(
             client,
             &t.schema_name,
@@ -657,8 +725,7 @@ pub async fn run_freeze_wraparound(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                let reason = e.to_string();
-                if is_lock_timeout(&reason) {
+                if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
                         &format!(
@@ -668,7 +735,7 @@ pub async fn run_freeze_wraparound(
                     );
                     summary.skipped += 1;
                 } else {
-                    logger.log_table_failed(&t.schema_name, &t.table_name, OP_FREEZE, &reason);
+                    logger.log_table_failed(&t.schema_name, &t.table_name, OP_FREEZE, &e.to_string());
                     summary.failed += 1;
                 }
             }
@@ -690,6 +757,7 @@ pub async fn run_bloat_vacuum(
     force: bool,
     already_handled: &std::collections::HashSet<(String, String)>,
     logger: &Arc<Logger>,
+    shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary::default();
     summary.total = tables.len();
@@ -708,6 +776,15 @@ pub async fn run_bloat_vacuum(
     );
 
     for (i, t) in tables.iter().enumerate() {
+        // Check if shutdown was requested
+        if *shutdown_rx.borrow() {
+            logger.log(
+                LogLevel::Warning,
+                "Shutdown signal received — stopping after current table.",
+            );
+            break;
+        }
+
         if already_handled.contains(&(t.schema_name.clone(), t.table_name.clone())) {
             logger.log(
                 LogLevel::Info,
@@ -756,8 +833,7 @@ pub async fn run_bloat_vacuum(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                let reason = e.to_string();
-                if is_lock_timeout(&reason) {
+                if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
                         &format!(
@@ -767,7 +843,7 @@ pub async fn run_bloat_vacuum(
                     );
                     summary.skipped += 1;
                 } else {
-                    logger.log_table_failed(&t.schema_name, &t.table_name, OP_BLOAT, &reason);
+                    logger.log_table_failed(&t.schema_name, &t.table_name, OP_BLOAT, &e.to_string());
                     summary.failed += 1;
                 }
             }
@@ -791,6 +867,7 @@ pub async fn run_stale_stats_analyze(
     force: bool,
     already_handled: &std::collections::HashSet<(String, String)>,
     logger: &Arc<Logger>,
+    shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary::default();
     summary.total = tables.len();
@@ -806,6 +883,15 @@ pub async fn run_stale_stats_analyze(
     );
 
     for (i, t) in tables.iter().enumerate() {
+        // Check if shutdown was requested
+        if *shutdown_rx.borrow() {
+            logger.log(
+                LogLevel::Warning,
+                "Shutdown signal received — stopping after current table.",
+            );
+            break;
+        }
+
         if already_handled.contains(&(t.schema_name.clone(), t.table_name.clone())) {
             logger.log(
                 LogLevel::Info,
@@ -853,8 +939,7 @@ pub async fn run_stale_stats_analyze(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                let reason = e.to_string();
-                if is_lock_timeout(&reason) {
+                if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
                         &format!(
@@ -864,7 +949,7 @@ pub async fn run_stale_stats_analyze(
                     );
                     summary.skipped += 1;
                 } else {
-                    logger.log_table_failed(&t.schema_name, &t.table_name, "ANALYZE (STALE STATS)", &reason);
+                    logger.log_table_failed(&t.schema_name, &t.table_name, "ANALYZE (STALE STATS)", &e.to_string());
                     summary.failed += 1;
                 }
             }
