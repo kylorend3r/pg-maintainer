@@ -197,6 +197,7 @@ impl Logger {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
+            #[allow(clippy::collapsible_if)]
             if let Some(ref mut writer) = *guard {
                 if let Err(e) = writer.write_all(line.as_bytes()) {
                     eprintln!("Failed to write to log file '{}': {}", self.log_file, e);
@@ -266,6 +267,7 @@ impl Drop for Logger {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
+        #[allow(clippy::collapsible_if)]
         if let Some(mut writer) = guard.take() {
             if let Err(e) = writer.flush() {
                 eprintln!(
