@@ -451,7 +451,11 @@ async fn vacuum_table(
 
     let removed = vacuum_output::get_dead_tuples_removed(dead_before, dead_after);
     Ok(OperationResult {
-        dead_tuples_before: if dead_before > 0 { Some(dead_before) } else { None },
+        dead_tuples_before: if dead_before > 0 {
+            Some(dead_before)
+        } else {
+            None
+        },
         dead_tuples_removed: removed,
     })
 }
@@ -481,7 +485,11 @@ async fn freeze_table(
 ) -> Result<OperationResult, tokio_postgres::Error> {
     // INDEX_CLEANUP FALSE avoids index bloat during aggressive freeze passes.
     // VERBOSE surfaces progress notices to the PostgreSQL log.
-    let mut opts = vec!["VERBOSE".to_string(), "FREEZE".to_string(), "INDEX_CLEANUP FALSE".to_string()];
+    let mut opts = vec![
+        "VERBOSE".to_string(),
+        "FREEZE".to_string(),
+        "INDEX_CLEANUP FALSE".to_string(),
+    ];
     if !vacuum_opts.truncate {
         opts.push("TRUNCATE FALSE".to_string());
     }
@@ -704,14 +712,7 @@ pub async fn run_vacuum_never_vacuumed(
             OP_VACUUM,
         );
         let start = Instant::now();
-        match vacuum_table(
-            client,
-            &t.schema_name,
-            &t.table_name,
-            vacuum_opts,
-        )
-        .await
-        {
+        match vacuum_table(client, &t.schema_name, &t.table_name, vacuum_opts).await {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_VACUUM, start.elapsed());
@@ -726,7 +727,10 @@ pub async fn run_vacuum_never_vacuumed(
                 } else if let Some(n) = result.dead_tuples_removed {
                     logger.log(
                         LogLevel::Info,
-                        &format!("VACUUM on \"{}\".\"{}\" removed {n} dead tuple(s)", t.schema_name, t.table_name),
+                        &format!(
+                            "VACUUM on \"{}\".\"{}\" removed {n} dead tuple(s)",
+                            t.schema_name, t.table_name
+                        ),
                     );
                 }
                 log_maintenance_operation(
@@ -1030,14 +1034,7 @@ pub async fn run_freeze_wraparound(
             OP_FREEZE,
         );
         let start = Instant::now();
-        match freeze_table(
-            client,
-            &t.schema_name,
-            &t.table_name,
-            vacuum_opts,
-        )
-        .await
-        {
+        match freeze_table(client, &t.schema_name, &t.table_name, vacuum_opts).await {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_FREEZE, start.elapsed());
@@ -1185,14 +1182,7 @@ pub async fn run_bloat_vacuum(
 
         logger.log_table_start(i + 1, tables.len(), &t.schema_name, &t.table_name, OP_BLOAT);
         let start = Instant::now();
-        match vacuum_table(
-            client,
-            &t.schema_name,
-            &t.table_name,
-            vacuum_opts,
-        )
-        .await
-        {
+        match vacuum_table(client, &t.schema_name, &t.table_name, vacuum_opts).await {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_BLOAT, start.elapsed());
@@ -1207,7 +1197,10 @@ pub async fn run_bloat_vacuum(
                 } else if let Some(n) = result.dead_tuples_removed {
                     logger.log(
                         LogLevel::Info,
-                        &format!("VACUUM on \"{}\".\"{}\" removed {n} dead tuple(s)", t.schema_name, t.table_name),
+                        &format!(
+                            "VACUUM on \"{}\".\"{}\" removed {n} dead tuple(s)",
+                            t.schema_name, t.table_name
+                        ),
                     );
                 }
                 log_maintenance_operation(
