@@ -4,6 +4,7 @@ Cargo.lock
 
 # Log files produced by the tool
 *.log
+logs/
 
 # macOS
 .DS_Store
@@ -32,3 +33,6 @@ schema/*
 
 # Design docs / planning scratch (not part of the shipped tool)
 plans-designs/
+
+# Claude Code local settings
+.claude/
