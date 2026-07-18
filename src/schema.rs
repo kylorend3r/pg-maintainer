@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use tokio_postgres::Client;
 
-const LOGBOOK_SCHEMA: &str = "maintainer_logbook";
+use crate::config::LOGBOOK_SCHEMA_NAME as LOGBOOK_SCHEMA;
 
 const CREATE_SCHEMA_SQL: &str = "CREATE SCHEMA maintainer_logbook";
 

@@ -9,7 +9,7 @@ pub const GET_ALL_USER_SCHEMAS: &str = r#"
     FROM pg_namespace
     WHERE nspname NOT IN (
         'pg_catalog', 'information_schema', 'pg_toast',
-        'pg_temp_1', 'pg_toast_temp_1'
+        'pg_temp_1', 'pg_toast_temp_1', 'maintainer_logbook'
     )
     AND nspname NOT LIKE 'pg_temp_%'
     AND nspname NOT LIKE 'pg_toast_temp_%'

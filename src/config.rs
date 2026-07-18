@@ -25,3 +25,7 @@ pub const DEFAULT_ANALYZE_SCALE_FACTOR: f64 = 0.1;
 // idle_session_timeout (set unconditionally in connection::connect()) requires PostgreSQL 14+
 pub const MIN_SUPPORTED_PG_VERSION_NUM: i32 = 140000;
 pub const MIN_SUPPORTED_PG_VERSION_LABEL: &str = "PostgreSQL 14";
+
+// The tool's own logging schema — always excluded from maintenance so pg-maintainer
+// never vacuums/analyzes its own logbook table.
+pub const LOGBOOK_SCHEMA_NAME: &str = "maintainer_logbook";

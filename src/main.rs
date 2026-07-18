@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use pg_maintainer::config::{
     DEFAULT_BLOAT_THRESHOLD_PCT, DEFAULT_MAINTENANCE_WORK_MEM_GB, DEFAULT_WRAPAROUND_MIN_AGE,
+    LOGBOOK_SCHEMA_NAME,
 };
 use pg_maintainer::connection::{self, ConnectionConfig};
 use pg_maintainer::logging::{LogLevel, Logger};
@@ -649,6 +650,23 @@ async fn main() -> Result<()> {
             .filter(|s| !s.is_empty())
             .collect()
     };
+
+    // The logbook schema is managed internally by pg-maintainer and must never be
+    // vacuumed/analyzed as regular user data, even if explicitly requested.
+    let logbook_requested = schemas.iter().any(|s| s == LOGBOOK_SCHEMA_NAME);
+    let schemas: Vec<String> = schemas
+        .into_iter()
+        .filter(|s| s != LOGBOOK_SCHEMA_NAME)
+        .collect();
+
+    if logbook_requested {
+        logger.log(
+            LogLevel::Warning,
+            &format!(
+                "Excluding '{LOGBOOK_SCHEMA_NAME}' schema from maintenance — it is managed internally by pg-maintainer"
+            ),
+        );
+    }
 
     if schemas.is_empty() {
         return Err(anyhow::anyhow!("No schemas to process."));
