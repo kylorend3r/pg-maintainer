@@ -310,3 +310,32 @@ pub const FIND_STALE_STATS_TABLE: &str = r#"
       AND t.n_mod_since_analyze > ($3::bigint + $4::float8 * COALESCE(t.n_live_tup, 0))
     ORDER BY t.n_mod_since_analyze DESC;
 "#;
+
+/// Get the dead tuple count for a specific table.
+/// Parameters:
+///   $1 = schema name (text)
+///   $2 = table name (text)
+pub const GET_DEAD_TUPLE_COUNT: &str = r#"
+    SELECT COALESCE(n_dead_tup, 0) AS n_dead_tup
+    FROM pg_stat_user_tables
+    WHERE schemaname = $1 AND relname = $2;
+"#;
+
+/// Insert a maintenance operation log entry into maintainer_logbook.
+/// Parameters:
+///   $1 = schema_name (text)
+///   $2 = table_name (text)
+///   $3 = operation (text) — "VACUUM", "ANALYZE", or "FREEZE"
+///   $4 = mode (text) — "never-vacuumed", "bloated", "wraparound", "never-analyzed", or "stale-stats"
+///   $5 = status (text) — "success" or "error"
+///   $6 = dead_tuples_before (bigint, nullable)
+///   $7 = dead_tuples_removed (bigint, nullable)
+///   $8 = duration_ms (bigint)
+///   $9 = error_message (text, nullable)
+pub const INSERT_MAINTENANCE_LOG: &str = r#"
+    INSERT INTO maintainer_logbook.maintenance_logbook
+      (run_started_at, schema_name, table_name, operation, mode, status,
+       dead_tuples_before, dead_tuples_removed, duration_ms, error_message)
+    VALUES
+      (now(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
+"#;

@@ -4,4 +4,6 @@ pub mod credentials;
 pub mod logging;
 pub mod operations;
 pub mod queries;
+pub mod schema;
 pub mod types;
+pub mod vacuum_output;

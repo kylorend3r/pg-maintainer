@@ -82,6 +82,11 @@ struct Args {
     #[arg(long, default_value = "false")]
     force: bool,
 
+    /// Never terminate a conflicting VACUUM (autovacuum or manual); always skip the table instead.
+    /// Overrides --force. Mutually exclusive with --force.
+    #[arg(long, default_value = "false")]
+    skip_active_vacuum: bool,
+
     /// Cap each mode to its top N candidate tables (default: no limit).
     #[arg(long, help = "Limit each mode to top N tables (default: unlimited)")]
     limit: Option<i64>,
@@ -192,6 +197,23 @@ struct Args {
     #[arg(long, default_value = "10")]
     connect_timeout_seconds: u64,
 
+    // ── VACUUM options ──────────────────────────────────────────────────────────
+    /// Add TRUNCATE to VACUUM commands (default: true, matches PostgreSQL default).
+    /// Pass --no-vacuum-truncate to disable and avoid the ACCESS EXCLUSIVE lock
+    /// truncation requires.
+    #[arg(long, default_value = "true", action = clap::ArgAction::Set)]
+    vacuum_truncate: bool,
+
+    /// Add DISABLE_PAGE_SKIPPING to VACUUM commands (default: false).
+    /// Forces a full scan even of all-visible pages.
+    #[arg(long, default_value = "false")]
+    vacuum_disable_page_skipping: bool,
+
+    /// Add SKIP_LOCKED to VACUUM commands (default: false).
+    /// Skip a table instead of waiting if a conflicting lock is held.
+    #[arg(long, default_value = "false")]
+    vacuum_skip_locked: bool,
+
     // ── Config file ──────────────────────────────────────────────────────────
     /// Path to a TOML configuration file. CLI arguments take precedence.
     #[arg(short = 'C', long, value_name = "FILE")]
@@ -214,6 +236,7 @@ struct Config {
     dry_run: Option<bool>,
     mode: Option<Vec<String>>,
     force: Option<bool>,
+    skip_active_vacuum: Option<bool>,
     limit: Option<i64>,
     bloat_threshold_pct: Option<f64>,
     analyze_threshold: Option<i64>,
@@ -232,6 +255,9 @@ struct Config {
     silence_mode: Option<bool>,
     statement_timeout_seconds: Option<u64>,
     connect_timeout_seconds: Option<u64>,
+    vacuum_truncate: Option<bool>,
+    vacuum_disable_page_skipping: Option<bool>,
+    vacuum_skip_locked: Option<bool>,
 }
 
 fn resolve_env_interpolation(value: Option<String>) -> Option<String> {
@@ -292,6 +318,9 @@ fn merge_config(file: Config, mut args: Args) -> Args {
     }
     if !args.force {
         args.force = file.force.unwrap_or(false);
+    }
+    if !args.skip_active_vacuum {
+        args.skip_active_vacuum = file.skip_active_vacuum.unwrap_or(false);
     }
     if args.limit.is_none() {
         args.limit = file.limit;
@@ -371,6 +400,18 @@ fn merge_config(file: Config, mut args: Args) -> Args {
         args.connect_timeout_seconds = v;
     }
 
+    if args.vacuum_truncate
+        && let Some(v) = file.vacuum_truncate
+    {
+        args.vacuum_truncate = v;
+    }
+    if !args.vacuum_disable_page_skipping {
+        args.vacuum_disable_page_skipping = file.vacuum_disable_page_skipping.unwrap_or(false);
+    }
+    if !args.vacuum_skip_locked {
+        args.vacuum_skip_locked = file.vacuum_skip_locked.unwrap_or(false);
+    }
+
     args
 }
 
@@ -432,6 +473,13 @@ async fn main() -> Result<()> {
         && limit <= 0
     {
         return Err(anyhow::anyhow!("--limit ({limit}) must be > 0"));
+    }
+
+    // Validate --force and --skip-active-vacuum are mutually exclusive
+    if args.force && args.skip_active_vacuum {
+        return Err(anyhow::anyhow!(
+            "--force and --skip-active-vacuum are mutually exclusive: choose one intent (terminate or skip)"
+        ));
     }
 
     // Validate --analyze-threshold and --analyze-scale-factor
@@ -618,6 +666,21 @@ async fn main() -> Result<()> {
         ),
     );
 
+    // Create logbook schema and tables (best-effort; failure doesn't abort maintenance)
+    match pg_maintainer::schema::ensure_logbook_schema(&client).await {
+        Ok(created) => {
+            if created {
+                logger.log(LogLevel::Info, "Created maintainer_logbook schema");
+            }
+        }
+        Err(e) => {
+            logger.log(
+                LogLevel::Warning,
+                &format!("Could not set up logbook schema: {e} — maintenance will continue without logging"),
+            );
+        }
+    }
+
     // Set maintenance_work_mem
     connection::set_maintenance_work_mem(&client, args.maintenance_work_mem_gb)
         .await
@@ -705,6 +768,18 @@ async fn main() -> Result<()> {
 
     let start = std::time::Instant::now();
 
+    let run_policy = pg_maintainer::types::RunPolicy {
+        dry_run: args.dry_run,
+        force: args.force,
+        skip_active_vacuum: args.skip_active_vacuum,
+    };
+
+    let vacuum_opts = pg_maintainer::types::VacuumOptions {
+        truncate: args.vacuum_truncate,
+        disable_page_skipping: args.vacuum_disable_page_skipping,
+        skip_locked: args.vacuum_skip_locked,
+    };
+
     let mut already_handled: HashSet<(String, String)> = HashSet::new();
 
     // ── Phase 1: VACUUM never-vacuumed tables ─────────────────────────────────
@@ -730,10 +805,10 @@ async fn main() -> Result<()> {
         operations::run_vacuum_never_vacuumed(
             &client,
             &candidates,
-            args.dry_run,
-            args.force,
+            run_policy,
             &logger,
             &mut shutdown_rx,
+            vacuum_opts,
         )
         .await
         .context("VACUUM phase failed")?
@@ -767,6 +842,7 @@ async fn main() -> Result<()> {
             &candidates,
             args.dry_run,
             args.force,
+            args.skip_active_vacuum,
             &logger,
             &mut shutdown_rx,
         )
@@ -800,10 +876,10 @@ async fn main() -> Result<()> {
         operations::run_freeze_wraparound(
             &client,
             &candidates,
-            args.dry_run,
-            args.force,
+            run_policy,
             &logger,
             &mut shutdown_rx,
+            vacuum_opts,
         )
         .await
         .context("VACUUM FREEZE phase failed")?
@@ -840,11 +916,11 @@ async fn main() -> Result<()> {
         let summary = operations::run_bloat_vacuum(
             &client,
             &candidates,
-            args.dry_run,
-            args.force,
+            run_policy,
             &already_handled,
             &logger,
             &mut shutdown_rx,
+            vacuum_opts,
         )
         .await
         .context("VACUUM BLOAT phase failed")?;
@@ -923,6 +999,7 @@ async fn main() -> Result<()> {
             effective_analyze_scale_factor,
             args.dry_run,
             args.force,
+            args.skip_active_vacuum,
             &already_handled,
             &logger,
             &mut shutdown_rx,
