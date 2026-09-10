@@ -49,6 +49,14 @@ wraparound-min-age = 200000000
 # ── Maintenance memory ────────────────────────────────────────────────────────
 maintenance-work-mem-gb = 1   # max: 32
 
+# ── I/O throttling ────────────────────────────────────────────────────────────
+# Session-scoped vacuum_cost_delay/vacuum_cost_limit. Omit both to inherit the
+# server's settings (PostgreSQL's default for manual VACUUM is no throttling).
+# Applies to every mode, and to ANALYZE as well as VACUUM.
+# gentle = false                # preset: cost delay 10ms, cost limit 200
+# vacuum-cost-delay-ms = 10     # 0-100; 0 explicitly disables throttling
+# vacuum-cost-limit    = 200    # 1-10000; cost budget spent between delays
+
 # ── VACUUM options ────────────────────────────────────────────────────────────
 vacuum-truncate = true                # truncate empty pages at end of table (default: true)
 # vacuum-disable-page-skipping = false # disable skipping all-visible pages (default: false)

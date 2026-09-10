@@ -336,6 +336,36 @@ pub async fn set_maintenance_work_mem(
     Ok(())
 }
 
+/// Set vacuum_cost_delay for the current session.
+///
+/// This is the I/O throttle: once a VACUUM (or ANALYZE) has accumulated
+/// `vacuum_cost_limit` cost credits, it sleeps for this many milliseconds. A
+/// value of 0 disables throttling, overriding whatever the server configured.
+pub async fn set_vacuum_cost_delay(
+    client: &tokio_postgres::Client,
+    cost_delay_ms: f64,
+) -> Result<()> {
+    let sql = format!("SET vacuum_cost_delay TO '{cost_delay_ms}ms'");
+    client
+        .execute(&sql, &[])
+        .await
+        .context("Failed to set vacuum_cost_delay")?;
+    Ok(())
+}
+
+/// Set vacuum_cost_limit for the current session.
+///
+/// The cost budget spent before `vacuum_cost_delay` kicks in. Has no effect
+/// unless `vacuum_cost_delay` is non-zero.
+pub async fn set_vacuum_cost_limit(client: &tokio_postgres::Client, cost_limit: i32) -> Result<()> {
+    let sql = format!("SET vacuum_cost_limit TO {cost_limit}");
+    client
+        .execute(&sql, &[])
+        .await
+        .context("Failed to set vacuum_cost_limit")?;
+    Ok(())
+}
+
 /// Set vacuum_buffer_usage_limit to 1/16 of shared_buffers (PostgreSQL 16+).
 ///
 /// Returns `(shared_buffers_kb, limit_kb)` so the caller can log both values.

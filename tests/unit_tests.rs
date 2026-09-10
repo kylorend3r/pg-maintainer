@@ -1,10 +1,15 @@
 //! Unit tests for types, credential parsing, and SQL query constants.
 //! These tests run without a PostgreSQL connection.
 
+use pg_maintainer::config::{
+    GENTLE_VACUUM_COST_DELAY_MS, GENTLE_VACUUM_COST_LIMIT, MAX_VACUUM_COST_DELAY_MS,
+    MAX_VACUUM_COST_LIMIT, MIN_VACUUM_COST_LIMIT,
+};
 use pg_maintainer::credentials::get_password_from_pgpass;
 use pg_maintainer::queries;
 use pg_maintainer::types::{
     BloatTableInfo, FreezeTableInfo, LogFormat, Mode, OperationSummary, SslMode, TableInfo,
+    ThrottleSettings,
 };
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -372,6 +377,149 @@ fn test_wraparound_query_excludes_system_schemas() {
     assert!(
         queries::FIND_WRAPAROUND_CANDIDATES.contains("'information_schema'"),
         "wraparound query must exclude information_schema"
+    );
+}
+
+// ── ThrottleSettings ──────────────────────────────────────────────────────────
+
+#[test]
+fn test_throttle_unset_by_default() {
+    let t = ThrottleSettings::resolve(None, None, false);
+    assert_eq!(t.cost_delay_ms, None);
+    assert_eq!(t.cost_limit, None);
+    assert!(!t.is_enabled());
+    assert!(!t.is_active());
+}
+
+#[test]
+fn test_throttle_gentle_fills_both_values() {
+    let t = ThrottleSettings::resolve(None, None, true);
+    assert_eq!(t.cost_delay_ms, Some(GENTLE_VACUUM_COST_DELAY_MS));
+    assert_eq!(t.cost_limit, Some(GENTLE_VACUUM_COST_LIMIT));
+    assert!(t.is_enabled());
+    assert!(t.is_active());
+}
+
+#[test]
+fn test_throttle_explicit_delay_wins_over_gentle() {
+    let t = ThrottleSettings::resolve(Some(25.0), None, true);
+    assert_eq!(t.cost_delay_ms, Some(25.0));
+    // the limit still comes from the preset
+    assert_eq!(t.cost_limit, Some(GENTLE_VACUUM_COST_LIMIT));
+}
+
+#[test]
+fn test_throttle_explicit_limit_wins_over_gentle() {
+    let t = ThrottleSettings::resolve(None, Some(400), true);
+    assert_eq!(t.cost_delay_ms, Some(GENTLE_VACUUM_COST_DELAY_MS));
+    assert_eq!(t.cost_limit, Some(400));
+}
+
+#[test]
+fn test_throttle_both_explicit_ignore_gentle() {
+    let t = ThrottleSettings::resolve(Some(5.0), Some(1000), true);
+    assert_eq!(t.cost_delay_ms, Some(5.0));
+    assert_eq!(t.cost_limit, Some(1000));
+}
+
+#[test]
+fn test_throttle_explicit_without_gentle() {
+    let t = ThrottleSettings::resolve(Some(20.0), Some(300), false);
+    assert_eq!(t.cost_delay_ms, Some(20.0));
+    assert_eq!(t.cost_limit, Some(300));
+}
+
+#[test]
+fn test_throttle_limit_alone_is_enabled_but_not_active() {
+    // A cost limit without a delay changes nothing about the I/O rate,
+    // but the SET is still issued.
+    let t = ThrottleSettings::resolve(None, Some(500), false);
+    assert!(t.is_enabled());
+    assert!(!t.is_active());
+}
+
+#[test]
+fn test_throttle_zero_delay_is_explicit_disable() {
+    // 0 is a valid, meaningful value: it overrides a server-configured delay.
+    let t = ThrottleSettings::resolve(Some(0.0), None, false);
+    assert!(t.validate().is_ok());
+    assert!(t.is_enabled(), "an explicit 0 must still issue the SET");
+    assert!(!t.is_active(), "a 0 delay does not throttle anything");
+}
+
+#[test]
+fn test_throttle_validate_delay_boundaries() {
+    assert!(
+        ThrottleSettings::resolve(Some(0.0), None, false)
+            .validate()
+            .is_ok()
+    );
+    assert!(
+        ThrottleSettings::resolve(Some(MAX_VACUUM_COST_DELAY_MS), None, false)
+            .validate()
+            .is_ok()
+    );
+    assert!(
+        ThrottleSettings::resolve(Some(-1.0), None, false)
+            .validate()
+            .is_err()
+    );
+    assert!(
+        ThrottleSettings::resolve(Some(MAX_VACUUM_COST_DELAY_MS + 0.1), None, false)
+            .validate()
+            .is_err()
+    );
+}
+
+#[test]
+fn test_throttle_validate_limit_boundaries() {
+    assert!(
+        ThrottleSettings::resolve(None, Some(MIN_VACUUM_COST_LIMIT), false)
+            .validate()
+            .is_ok()
+    );
+    assert!(
+        ThrottleSettings::resolve(None, Some(MAX_VACUUM_COST_LIMIT), false)
+            .validate()
+            .is_ok()
+    );
+    // PostgreSQL's vacuum_cost_limit floor is 1, not 0
+    assert!(
+        ThrottleSettings::resolve(None, Some(0), false)
+            .validate()
+            .is_err()
+    );
+    assert!(
+        ThrottleSettings::resolve(None, Some(MAX_VACUUM_COST_LIMIT + 1), false)
+            .validate()
+            .is_err()
+    );
+    assert!(
+        ThrottleSettings::resolve(None, Some(-5), false)
+            .validate()
+            .is_err()
+    );
+}
+
+#[test]
+fn test_throttle_validate_error_names_the_flag() {
+    let delay_err = ThrottleSettings::resolve(Some(500.0), None, false)
+        .validate()
+        .unwrap_err();
+    assert!(delay_err.contains("--vacuum-cost-delay-ms"), "{delay_err}");
+
+    let limit_err = ThrottleSettings::resolve(None, Some(99_999), false)
+        .validate()
+        .unwrap_err();
+    assert!(limit_err.contains("--vacuum-cost-limit"), "{limit_err}");
+}
+
+#[test]
+fn test_throttle_gentle_preset_is_within_postgres_ranges() {
+    assert!(
+        ThrottleSettings::resolve(None, None, true)
+            .validate()
+            .is_ok()
     );
 }
 

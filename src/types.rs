@@ -14,6 +14,73 @@ pub struct RunPolicy {
     pub skip_active_vacuum: bool,
 }
 
+/// Session-scoped I/O throttling settings (`vacuum_cost_delay`/`vacuum_cost_limit`).
+///
+/// `None` means "leave the server's value alone". A `Some(0.0)` delay is an
+/// explicit *disable* — it still issues the `SET`, overriding whatever
+/// `postgresql.conf` configured.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct ThrottleSettings {
+    pub cost_delay_ms: Option<f64>,
+    pub cost_limit: Option<i32>,
+}
+
+impl ThrottleSettings {
+    /// Combine the explicit flags with the `--gentle` preset.
+    ///
+    /// An explicitly-given value always wins; `--gentle` only fills in whichever
+    /// of the two was left unset.
+    pub fn resolve(cost_delay_ms: Option<f64>, cost_limit: Option<i32>, gentle: bool) -> Self {
+        if gentle {
+            Self {
+                cost_delay_ms: cost_delay_ms.or(Some(crate::config::GENTLE_VACUUM_COST_DELAY_MS)),
+                cost_limit: cost_limit.or(Some(crate::config::GENTLE_VACUUM_COST_LIMIT)),
+            }
+        } else {
+            Self {
+                cost_delay_ms,
+                cost_limit,
+            }
+        }
+    }
+
+    /// Check both values against PostgreSQL's accepted GUC ranges.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(delay) = self.cost_delay_ms
+            && !(0.0..=crate::config::MAX_VACUUM_COST_DELAY_MS).contains(&delay)
+        {
+            return Err(format!(
+                "--vacuum-cost-delay-ms ({delay}) must be between 0 and {}",
+                crate::config::MAX_VACUUM_COST_DELAY_MS
+            ));
+        }
+        if let Some(limit) = self.cost_limit
+            && !(crate::config::MIN_VACUUM_COST_LIMIT..=crate::config::MAX_VACUUM_COST_LIMIT)
+                .contains(&limit)
+        {
+            return Err(format!(
+                "--vacuum-cost-limit ({limit}) must be between {} and {}",
+                crate::config::MIN_VACUUM_COST_LIMIT,
+                crate::config::MAX_VACUUM_COST_LIMIT
+            ));
+        }
+        Ok(())
+    }
+
+    /// True when at least one `SET` will be issued for this session.
+    pub fn is_enabled(&self) -> bool {
+        self.cost_delay_ms.is_some() || self.cost_limit.is_some()
+    }
+
+    /// True when a non-zero delay will actually throttle the session.
+    ///
+    /// Distinct from [`Self::is_enabled`]: `--vacuum-cost-delay-ms 0` is an
+    /// explicit disable, so it is enabled but not active.
+    pub fn is_active(&self) -> bool {
+        self.cost_delay_ms.is_some_and(|d| d > 0.0)
+    }
+}
+
 /// A table identified by schema + name with optional row-count hints from pg_stat_user_tables.
 #[derive(Debug, Clone)]
 pub struct TableInfo {
