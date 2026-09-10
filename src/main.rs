@@ -157,6 +157,35 @@ struct Args {
     #[arg(short = 'w', long, default_value_t = DEFAULT_MAINTENANCE_WORK_MEM_GB)]
     maintenance_work_mem_gb: u64,
 
+    // ── I/O throttling ───────────────────────────────────────────────────────
+    /// vacuum_cost_delay in milliseconds (0–100) for this session.
+    /// Throttles VACUUM and ANALYZE I/O so maintenance competes less with production
+    /// traffic. 0 explicitly disables throttling. Default: leave the server's value alone.
+    #[arg(
+        long,
+        value_name = "MS",
+        help = "Session vacuum_cost_delay in ms (0-100). Throttles VACUUM/ANALYZE I/O."
+    )]
+    vacuum_cost_delay_ms: Option<f64>,
+
+    /// vacuum_cost_limit (1–10000) for this session — the cost budget spent before
+    /// each --vacuum-cost-delay-ms sleep. Default: leave the server's value alone.
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Session vacuum_cost_limit (1-10000). Cost budget between delays."
+    )]
+    vacuum_cost_limit: Option<i32>,
+
+    /// Preset for conservative background maintenance: vacuum_cost_delay 10ms,
+    /// vacuum_cost_limit 200. Explicit --vacuum-cost-delay-ms/--vacuum-cost-limit values win.
+    #[arg(
+        long,
+        default_value = "false",
+        help = "Throttle preset: vacuum_cost_delay 10ms, vacuum_cost_limit 200"
+    )]
+    gentle: bool,
+
     // ── SSL ──────────────────────────────────────────────────────────────────
     #[arg(long, default_value = "disable", value_parser = clap::value_parser!(SslMode))]
     sslmode: SslMode,
@@ -247,6 +276,9 @@ struct Config {
     wraparound_min_age: Option<i64>,
     wraparound_pct: Option<f64>,
     maintenance_work_mem_gb: Option<u64>,
+    vacuum_cost_delay_ms: Option<f64>,
+    vacuum_cost_limit: Option<i32>,
+    gentle: Option<bool>,
     sslmode: Option<String>,
     ssl_ca_cert: Option<String>,
     ssl_client_cert: Option<String>,
@@ -357,6 +389,16 @@ fn merge_config(file: Config, mut args: Args) -> Args {
         && let Some(v) = file.maintenance_work_mem_gb
     {
         args.maintenance_work_mem_gb = v;
+    }
+
+    if args.vacuum_cost_delay_ms.is_none() {
+        args.vacuum_cost_delay_ms = file.vacuum_cost_delay_ms;
+    }
+    if args.vacuum_cost_limit.is_none() {
+        args.vacuum_cost_limit = file.vacuum_cost_limit;
+    }
+    if !args.gentle {
+        args.gentle = file.gentle.unwrap_or(false);
     }
 
     if args.sslmode == SslMode::Disable
@@ -536,6 +578,14 @@ async fn main() -> Result<()> {
         ));
     }
 
+    // Resolve and validate I/O throttling (--gentle fills in whatever was left unset)
+    let throttle = pg_maintainer::types::ThrottleSettings::resolve(
+        args.vacuum_cost_delay_ms,
+        args.vacuum_cost_limit,
+        args.gentle,
+    );
+    throttle.validate().map_err(|e| anyhow::anyhow!(e))?;
+
     // Validate wraparound_pct range
     if let Some(pct) = args.wraparound_pct
         && !(0.0..=100.0).contains(&pct)
@@ -711,6 +761,37 @@ async fn main() -> Result<()> {
         ),
     );
 
+    // Apply I/O throttling. Unlike vacuum_buffer_usage_limit below, these are hard
+    // errors: an operator who asked to run gently on a production box must not get an
+    // un-throttled run because a SET quietly failed.
+    if let Some(delay_ms) = throttle.cost_delay_ms {
+        connection::set_vacuum_cost_delay(&client, delay_ms)
+            .await
+            .context("Failed to set vacuum_cost_delay")?;
+        if delay_ms > 0.0 {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "vacuum_cost_delay set to {delay_ms}ms for this session — VACUUM and ANALYZE are throttled"
+                ),
+            );
+        } else {
+            logger.log(
+                LogLevel::Info,
+                "vacuum_cost_delay set to 0 for this session — I/O throttling explicitly disabled",
+            );
+        }
+    }
+    if let Some(cost_limit) = throttle.cost_limit {
+        connection::set_vacuum_cost_limit(&client, cost_limit)
+            .await
+            .context("Failed to set vacuum_cost_limit")?;
+        logger.log(
+            LogLevel::Info,
+            &format!("vacuum_cost_limit set to {cost_limit} for this session"),
+        );
+    }
+
     // Set vacuum_buffer_usage_limit to 1/16 of shared_buffers (PostgreSQL 16+).
     match connection::set_vacuum_buffer_usage_limit(&client).await {
         Ok((shared_buffers_kb, limit_kb)) => logger.log(
@@ -731,12 +812,24 @@ async fn main() -> Result<()> {
     // so VACUUM's index-cleanup phase can use the full parallel worker pool
     // (no effect on Phase 3/freeze, which runs with INDEX_CLEANUP FALSE).
     match connection::set_max_parallel_maintenance_workers(&client).await {
-        Ok(workers) => logger.log(
-            LogLevel::Info,
-            &format!(
-                "max_parallel_maintenance_workers set to {workers} (matches max_parallel_workers)"
-            ),
-        ),
+        Ok(workers) => {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "max_parallel_maintenance_workers set to {workers} (matches max_parallel_workers)"
+                ),
+            );
+            if throttle.is_active() && workers > 0 {
+                logger.log(
+                    LogLevel::Warning,
+                    &format!(
+                        "I/O throttling is active alongside {workers} parallel maintenance worker(s) — \
+                         PostgreSQL shares one cost budget across all workers, so the extra workers \
+                         will not exceed the configured I/O limit, but will not speed the run up either"
+                    ),
+                );
+            }
+        }
         Err(e) => logger.log(
             LogLevel::Warning,
             &format!("Could not set max_parallel_maintenance_workers: {e}"),

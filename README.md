@@ -28,6 +28,7 @@ A single-threaded PostgreSQL table maintenance tool written in Rust. It runs fiv
 - [Options](#options)
 - [Command Line Interface](#command-line-interface)
 - [Key Features](#key-features)
+- [I/O Throttling](#io-throttling-running-gently)
 - [Integration Testing](#integration-testing)
 - [Config File](#config-file)
 - [License](#license)
@@ -134,6 +135,12 @@ pg-maintainer -d mydb -s public --mode stale-stats --analyze-threshold 100
 # Filter tables by size
 pg-maintainer -d mydb -s public --min-table-size-gb 0.5 --max-table-size-gb 10
 
+# Run gently on a busy OLTP server (cost delay 10ms, cost limit 200)
+pg-maintainer -d mydb -s public --gentle
+
+# Same, with a hand-picked cost pair
+pg-maintainer -d mydb -s public --vacuum-cost-delay-ms 20 --vacuum-cost-limit 400
+
 # SSL connection to a remote server
 pg-maintainer -d mydb -s public -H prod-db.company.com --sslmode verify-full --ssl-ca-cert /path/to/ca.pem
 
@@ -194,6 +201,16 @@ Overall configuration precedence: CLI arguments → TOML config file (`-C`) → 
 | `--wraparound-min-age` | XID age threshold for `wraparound` mode (default: `200000000`) |
 | `--wraparound-pct` | Wraparound threshold as % of `autovacuum_freeze_max_age`; overrides `--wraparound-min-age` |
 | `-w, --maintenance-work-mem-gb` | Session `maintenance_work_mem` in GB (default: `1`, max: `32`) |
+
+### I/O Throttling
+
+| Flag | Description |
+|---|---|
+| `--gentle` | Preset for background maintenance: `vacuum_cost_delay` 10 ms, `vacuum_cost_limit` 200 |
+| `--vacuum-cost-delay-ms` | Session `vacuum_cost_delay` in ms, `0`–`100` (default: inherit the server's value) |
+| `--vacuum-cost-limit` | Session `vacuum_cost_limit`, `1`–`10000` (default: inherit the server's value) |
+
+See [I/O throttling](#io-throttling-running-gently) for how these interact.
 
 ### SSL
 | Flag | Description |
@@ -263,6 +280,12 @@ Options:
           Wraparound threshold as % of autovacuum_freeze_max_age (0–100). Overrides --wraparound-min-age.
   -w, --maintenance-work-mem-gb <MAINTENANCE_WORK_MEM_GB>
           maintenance_work_mem in GB for this session (default: 1, max: 32) [default: 1]
+      --vacuum-cost-delay-ms <MS>
+          Session vacuum_cost_delay in ms (0-100). Throttles VACUUM/ANALYZE I/O.
+      --vacuum-cost-limit <N>
+          Session vacuum_cost_limit (1-10000). Cost budget between delays.
+      --gentle
+          Throttle preset: vacuum_cost_delay 10ms, vacuum_cost_limit 200
       --sslmode <SSLMODE>
           [default: disable]
       --ssl-ca-cert <SSL_CA_CERT>
@@ -301,12 +324,59 @@ Options:
 - **Graceful shutdown**: SIGTERM and SIGINT signal handlers stop after the current table, run the final summary, and exit cleanly
 - **Fast-fail locking**: 10ms `lock_timeout` for the session so runs never block indefinitely behind another process's lock
 - **Automatic session tuning**: `vacuum_buffer_usage_limit` is set to 1/16 of `shared_buffers` (PostgreSQL 16+) and `max_parallel_maintenance_workers` is raised to match the server's `max_parallel_workers`, so VACUUM's index-cleanup phase can use the full parallel worker pool instead of the low built-in default. Both are session-scoped `SET`s, no server config changes required. Neither affects Phase 3 (freeze), which runs with `INDEX_CLEANUP FALSE`.
+- **I/O throttling**: `--gentle` (or explicit `--vacuum-cost-delay-ms`/`--vacuum-cost-limit`) makes maintenance yield to production traffic instead of running as fast as the storage allows. Opt-in; the speed tuning above stays the default. See [I/O throttling](#io-throttling-running-gently).
 - **Wraparound tuning**: flag candidates by absolute XID age (`--wraparound-min-age`) or by percentage of `autovacuum_freeze_max_age` (`--wraparound-pct`)
 - **SSL/TLS**: `disable`/`require`/`verify-ca`/`verify-full`, with custom CA and mutual TLS support
 - **Multiple credential sources**: `PG_PASSWORD`, `PG_PASSWORD_FILE` (Docker/Kubernetes secrets), `.pgpass`/`$PGPASSFILE`, or CLI flag
 - **Config file**: TOML configuration with env-var interpolation (`password = "${PG_PASSWORD}"`) and CLI override support
 - **Structured logging**: text or JSON log format, optional silence mode, buffered file + stdout output
 - **Dry run**: preview every VACUUM/ANALYZE candidate and command before anything executes
+
+## I/O Throttling (Running Gently)
+
+PostgreSQL's default `vacuum_cost_delay` for a *manual* `VACUUM` is `0`, which means
+no throttling: a `VACUUM` pg-maintainer issues will consume as much I/O as the
+storage can deliver. On a busy OLTP server that is often the wrong trade. These
+flags turn on PostgreSQL's cost-based delay for the session:
+
+```bash
+# Conservative preset — vacuum_cost_delay 10ms, vacuum_cost_limit 200
+pg-maintainer -d mydb -s public --gentle
+
+# Explicit values
+pg-maintainer -d mydb -s public --vacuum-cost-delay-ms 20 --vacuum-cost-limit 400
+
+# --gentle, but with a larger budget: the explicit value wins over the preset
+pg-maintainer -d mydb -s public --gentle --vacuum-cost-limit 400
+```
+
+How it works: PostgreSQL charges each buffer access a cost (`1` for a hit, `2` for a
+miss, `20` for dirtying a page). Once a run has spent `vacuum_cost_limit` credits it
+sleeps for `vacuum_cost_delay` milliseconds. A smaller limit or a longer delay means
+less I/O per unit of wall-clock time, and a proportionally longer run.
+
+Things worth knowing:
+
+- **Applies to every mode, and to `ANALYZE` too.** Both are session-scoped `SET`s
+  issued once after connecting. PostgreSQL's cost accounting covers `ANALYZE`
+  whenever `vacuum_cost_delay` is non-zero. Small tables (the typical
+  `never-vacuumed`/`never-analyzed` candidates) never accumulate enough credits to
+  sleep, so throttling them costs nothing.
+- **`--vacuum-cost-delay-ms 0` is an explicit disable**, not "leave it alone". Use it
+  to override a `vacuum_cost_delay` set in `postgresql.conf`. Omitting the flag
+  entirely is what inherits the server's value.
+- **Throttling coexists with the automatic speed tuning** — it does not switch off
+  `maintenance_work_mem`, `vacuum_buffer_usage_limit`, or the parallel worker boost.
+  The first two are memory knobs and are orthogonal to I/O rate; a large
+  `maintenance_work_mem` is still worth having, because it means fewer index passes.
+- **Parallel workers and throttling.** PostgreSQL shares one cost budget across all
+  parallel vacuum workers rather than giving each its own, so the extra workers
+  cannot push I/O past your configured limit — but they cannot make a throttled run
+  faster either. pg-maintainer logs a warning when both are active so this is not a
+  surprise. If you want the workers to be useful, drop the throttle.
+- **Throttled runs take longer.** Pair `--gentle` with a generous or absent
+  `--statement-timeout-seconds`, and check that a throttled run still fits inside
+  its cron/CronJob window.
 
 ## Production Notes
 

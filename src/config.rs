@@ -21,6 +21,17 @@ pub const DEFAULT_BLOAT_MIN_DEAD_TUP: i64 = 1000;
 pub const DEFAULT_ANALYZE_THRESHOLD: i64 = 50;
 pub const DEFAULT_ANALYZE_SCALE_FACTOR: f64 = 0.1;
 
+// I/O throttling (cost-based vacuum delay). Ranges match PostgreSQL's GUC limits:
+// vacuum_cost_delay is a floating-point value in ms with range 0–100 (PostgreSQL 12+),
+// vacuum_cost_limit is an integer with range 1–10000.
+pub const MAX_VACUUM_COST_DELAY_MS: f64 = 100.0;
+pub const MIN_VACUUM_COST_LIMIT: i32 = 1;
+pub const MAX_VACUUM_COST_LIMIT: i32 = 10_000;
+
+// The --gentle preset: PostgreSQL's historical conservative cost pair.
+pub const GENTLE_VACUUM_COST_DELAY_MS: f64 = 10.0;
+pub const GENTLE_VACUUM_COST_LIMIT: i32 = 200;
+
 // Minimum supported PostgreSQL server version
 // idle_session_timeout (set unconditionally in connection::connect()) requires PostgreSQL 14+
 pub const MIN_SUPPORTED_PG_VERSION_NUM: i32 = 140000;

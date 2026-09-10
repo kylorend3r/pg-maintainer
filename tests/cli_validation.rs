@@ -953,3 +953,193 @@ fn test_fractional_gb_values() {
         .assert()
         .code(predicate::ne(2));
 }
+
+// ── I/O throttling (--gentle / --vacuum-cost-delay-ms / --vacuum-cost-limit) ────
+
+#[test]
+fn test_gentle_flag_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--gentle")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_vacuum_cost_flags_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--vacuum-cost-delay-ms")
+        .arg("20")
+        .arg("--vacuum-cost-limit")
+        .arg("400")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_gentle_with_explicit_overrides_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--gentle")
+        .arg("--vacuum-cost-limit")
+        .arg("400")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_vacuum_cost_delay_zero_accepted() {
+    // 0 is an explicit "disable throttling", not an invalid value
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--vacuum-cost-delay-ms")
+        .arg("0")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_vacuum_cost_delay_at_max_boundary() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--vacuum-cost-delay-ms")
+        .arg("100")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_vacuum_cost_delay_above_max_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--vacuum-cost-delay-ms")
+        .arg("101")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--vacuum-cost-delay-ms"))
+        .stderr(predicate::str::contains("must be between 0 and 100"));
+}
+
+#[test]
+fn test_vacuum_cost_delay_not_a_number_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--vacuum-cost-delay-ms")
+        .arg("slow")
+        .env_clear()
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn test_vacuum_cost_limit_boundaries_accepted() {
+    for limit in ["1", "10000"] {
+        cmd()
+            .arg("--schema")
+            .arg("public")
+            .arg("--vacuum-cost-limit")
+            .arg(limit)
+            .env_clear()
+            .assert()
+            .code(predicate::ne(2));
+    }
+}
+
+#[test]
+fn test_vacuum_cost_limit_zero_rejected() {
+    // PostgreSQL's vacuum_cost_limit floor is 1
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--vacuum-cost-limit")
+        .arg("0")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--vacuum-cost-limit"))
+        .stderr(predicate::str::contains("must be between 1 and 10000"));
+}
+
+#[test]
+fn test_vacuum_cost_limit_above_max_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--vacuum-cost-limit")
+        .arg("10001")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--vacuum-cost-limit"));
+}
+
+#[test]
+fn test_help_contains_throttling_flags() {
+    cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--gentle"))
+        .stdout(predicate::str::contains("--vacuum-cost-delay-ms"))
+        .stdout(predicate::str::contains("--vacuum-cost-limit"));
+}
+
+#[test]
+fn test_config_file_with_throttling_keys() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+gentle = true
+vacuum-cost-delay-ms = 15.0
+vacuum-cost-limit = 300
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        // Parses and validates; only the DB connection fails
+        .code(predicate::ne(2))
+        .stderr(predicate::str::contains("vacuum-cost").not());
+}
+
+#[test]
+fn test_config_file_with_invalid_throttling_value_rejected() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+vacuum-cost-limit = 50000
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--vacuum-cost-limit"));
+}
