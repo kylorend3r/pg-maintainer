@@ -1,7 +1,8 @@
 use crate::logging::{LogContext, LogLevel, Logger};
 use crate::queries;
 use crate::types::{
-    BloatTableInfo, FreezeTableInfo, OperationSummary, RunPolicy, TableInfo, VacuumOptions,
+    BloatTableInfo, ExplicitTable, FreezeTableInfo, LagGateVerdict, LagObservation,
+    OperationSummary, ReplicaLagGate, RunPolicy, StandbyLag, TableInfo, VacuumOptions,
 };
 use crate::vacuum_output;
 use anyhow::Result;
@@ -654,6 +655,7 @@ pub async fn run_vacuum_never_vacuumed(
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
     vacuum_opts: VacuumOptions,
+    lag_gate: Option<&ReplicaLagGate>,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary {
         total: tables.len(),
@@ -679,6 +681,27 @@ pub async fn run_vacuum_never_vacuumed(
             );
             break;
         }
+        if let Some(gate) = lag_gate {
+            match wait_for_replica_lag(
+                client,
+                gate,
+                &t.schema_name,
+                &t.table_name,
+                policy,
+                logger,
+                shutdown_rx,
+            )
+            .await?
+            {
+                LagGateVerdict::Proceed => {}
+                LagGateVerdict::SkipTable => {
+                    summary.skipped += 1;
+                    continue;
+                }
+                LagGateVerdict::ShutdownRequested => break,
+            }
+        }
+
         let proceed = handle_active_vacuums(
             client,
             &t.schema_name,
@@ -798,6 +821,7 @@ pub async fn run_vacuum_never_vacuumed(
 /// If `table` is Some, only that table is checked and (if eligible) analyzed.
 /// If `force` is true, active vacuums on the table are terminated before starting.
 /// Otherwise tables with an active vacuum are skipped.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_analyze_never_analyzed(
     client: &Client,
     tables: &[TableInfo],
@@ -806,6 +830,7 @@ pub async fn run_analyze_never_analyzed(
     skip_active_vacuum: bool,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
+    lag_gate: Option<&ReplicaLagGate>,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary {
         total: tables.len(),
@@ -837,6 +862,27 @@ pub async fn run_analyze_never_analyzed(
             );
             break;
         }
+        if let Some(gate) = lag_gate {
+            match wait_for_replica_lag(
+                client,
+                gate,
+                &t.schema_name,
+                &t.table_name,
+                policy,
+                logger,
+                shutdown_rx,
+            )
+            .await?
+            {
+                LagGateVerdict::Proceed => {}
+                LagGateVerdict::SkipTable => {
+                    summary.skipped += 1;
+                    continue;
+                }
+                LagGateVerdict::ShutdownRequested => break,
+            }
+        }
+
         let proceed = handle_active_vacuums(
             client,
             &t.schema_name,
@@ -950,6 +996,7 @@ pub async fn run_freeze_wraparound(
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
     vacuum_opts: VacuumOptions,
+    lag_gate: Option<&ReplicaLagGate>,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary {
         total: tables.len(),
@@ -1001,6 +1048,27 @@ pub async fn run_freeze_wraparound(
             );
             break;
         }
+        if let Some(gate) = lag_gate {
+            match wait_for_replica_lag(
+                client,
+                gate,
+                &t.schema_name,
+                &t.table_name,
+                policy,
+                logger,
+                shutdown_rx,
+            )
+            .await?
+            {
+                LagGateVerdict::Proceed => {}
+                LagGateVerdict::SkipTable => {
+                    summary.skipped += 1;
+                    continue;
+                }
+                LagGateVerdict::ShutdownRequested => break,
+            }
+        }
+
         let proceed = handle_active_vacuums(
             client,
             &t.schema_name,
@@ -1104,6 +1172,7 @@ pub async fn run_freeze_wraparound(
 /// If `force` is true, active vacuums on the table are terminated before starting.
 /// Otherwise tables with an active vacuum are skipped.
 /// Tables already vacuumed by earlier phases are skipped (tracked in `already_handled`).
+#[allow(clippy::too_many_arguments)]
 pub async fn run_bloat_vacuum(
     client: &Client,
     tables: &[BloatTableInfo],
@@ -1112,6 +1181,7 @@ pub async fn run_bloat_vacuum(
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
     vacuum_opts: VacuumOptions,
+    lag_gate: Option<&ReplicaLagGate>,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary {
         total: tables.len(),
@@ -1151,6 +1221,27 @@ pub async fn run_bloat_vacuum(
             );
             summary.skipped += 1;
             continue;
+        }
+
+        if let Some(gate) = lag_gate {
+            match wait_for_replica_lag(
+                client,
+                gate,
+                &t.schema_name,
+                &t.table_name,
+                policy,
+                logger,
+                shutdown_rx,
+            )
+            .await?
+            {
+                LagGateVerdict::Proceed => {}
+                LagGateVerdict::SkipTable => {
+                    summary.skipped += 1;
+                    continue;
+                }
+                LagGateVerdict::ShutdownRequested => break,
+            }
         }
 
         let proceed = handle_active_vacuums(
@@ -1281,6 +1372,7 @@ pub async fn run_stale_stats_analyze(
     already_handled: &std::collections::HashSet<(String, String)>,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
+    lag_gate: Option<&ReplicaLagGate>,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary {
         total: tables.len(),
@@ -1323,6 +1415,27 @@ pub async fn run_stale_stats_analyze(
             );
             summary.skipped += 1;
             continue;
+        }
+
+        if let Some(gate) = lag_gate {
+            match wait_for_replica_lag(
+                client,
+                gate,
+                &t.schema_name,
+                &t.table_name,
+                policy,
+                logger,
+                shutdown_rx,
+            )
+            .await?
+            {
+                LagGateVerdict::Proceed => {}
+                LagGateVerdict::SkipTable => {
+                    summary.skipped += 1;
+                    continue;
+                }
+                LagGateVerdict::ShutdownRequested => break,
+            }
         }
 
         let proceed = handle_active_vacuums(
@@ -1443,4 +1556,616 @@ pub async fn discover_all_user_schemas(client: &Client) -> Result<Vec<String>> {
         .into_iter()
         .map(|row| row.get::<_, String>(0))
         .collect())
+}
+
+// ─── Replication lag ──────────────────────────────────────────────────────────
+
+/// Read every standby's replay lag from the primary.
+///
+/// Probes role membership first: without `pg_read_all_stats` the view returns no
+/// rows, which would otherwise be indistinguishable from a healthy cluster with
+/// no replicas.
+pub async fn observe_replica_lag(client: &Client) -> Result<LagObservation> {
+    let can_read: bool = client
+        .query_one(queries::GET_CAN_READ_REPLICATION_STATS, &[])
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to check replication-stats privileges: {e}"))?
+        .get("can_read");
+
+    if !can_read {
+        return Ok(LagObservation::Unobservable);
+    }
+
+    let rows = client
+        .query(queries::GET_REPLICATION_LAG, &[])
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read pg_stat_replication: {e}"))?;
+
+    if rows.is_empty() {
+        return Ok(LagObservation::NoReplicas);
+    }
+
+    Ok(LagObservation::Observed(
+        rows.into_iter()
+            .map(|row| StandbyLag {
+                application_name: row.get("application_name"),
+                state: row.get("state"),
+                sync_state: row.get("sync_state"),
+                replay_lag_seconds: row.get("replay_lag_seconds"),
+            })
+            .collect(),
+    ))
+}
+
+/// Describe a standby for a log line.
+fn describe_standby(s: &StandbyLag) -> String {
+    let name = if s.application_name.is_empty() {
+        "<unnamed>"
+    } else {
+        &s.application_name
+    };
+    match s.replay_lag_seconds {
+        Some(lag) => format!("{name} ({}, {}) {lag:.1}s behind", s.state, s.sync_state),
+        None => format!("{name} ({}, {}) caught up", s.state, s.sync_state),
+    }
+}
+
+/// Hold maintenance on one table until replication lag falls under the threshold.
+///
+/// Returns `Proceed` when the table may be maintained, `SkipTable` when the wait
+/// expired, and `ShutdownRequested` when a signal arrived mid-wait.
+pub async fn wait_for_replica_lag(
+    client: &Client,
+    gate: &ReplicaLagGate,
+    schema: &str,
+    table: &str,
+    policy: RunPolicy,
+    logger: &Arc<Logger>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+) -> Result<LagGateVerdict> {
+    if gate.is_disabled() {
+        return Ok(LagGateVerdict::Proceed);
+    }
+
+    let observation = observe_replica_lag(client).await?;
+
+    match observation {
+        LagObservation::Unobservable => {
+            gate.disable();
+            logger.log(
+                LogLevel::Warning,
+                "Cannot observe replication lag — the connected role lacks pg_read_all_stats \
+                 (granted by pg_monitor). Lag gating is disabled for this run; grant the role \
+                 pg_monitor to enable it.",
+            );
+            return Ok(LagGateVerdict::Proceed);
+        }
+        LagObservation::NoReplicas => {
+            gate.disable();
+            logger.log(
+                LogLevel::Info,
+                "No replicas are streaming from this server — replication-lag gating is \
+                 disabled for this run.",
+            );
+            return Ok(LagGateVerdict::Proceed);
+        }
+        LagObservation::Observed(_) => {}
+    }
+
+    // Within threshold: proceed silently. Logging here would add a line per table.
+    if !observation.exceeds(gate.threshold_seconds) {
+        return Ok(LagGateVerdict::Proceed);
+    }
+
+    let observed = observation.max_lag_seconds().unwrap_or(0.0);
+
+    if policy.dry_run {
+        logger.log(
+            LogLevel::Info,
+            &format!(
+                "[DRY RUN] Would wait before \"{schema}\".\"{table}\" — replication lag {observed:.1}s \
+                 exceeds {:.1}s",
+                gate.threshold_seconds
+            ),
+        );
+        return Ok(LagGateVerdict::Proceed);
+    }
+
+    if gate.max_wait_seconds == 0 {
+        gate.record_skip();
+        logger.log(
+            LogLevel::Warning,
+            &format!(
+                "Skipping \"{schema}\".\"{table}\" — replication lag {observed:.1}s exceeds \
+                 {:.1}s and --max-replica-lag-wait-seconds is 0",
+                gate.threshold_seconds
+            ),
+        );
+        return Ok(LagGateVerdict::SkipTable);
+    }
+
+    logger.log(
+        LogLevel::Info,
+        &format!(
+            "Replication lag {observed:.1}s exceeds {:.1}s — waiting up to {}s before \
+             \"{schema}\".\"{table}\"",
+            gate.threshold_seconds, gate.max_wait_seconds
+        ),
+    );
+
+    let started = Instant::now();
+    let deadline = std::time::Duration::from_secs(gate.max_wait_seconds);
+    let poll = std::time::Duration::from_secs(gate.poll_interval_seconds.max(1));
+
+    loop {
+        // Never sleep past the deadline: with a 5s poll and a 12s budget, sleeping a
+        // full interval each time would overshoot to 15s and make the "up to Ns"
+        // message a lie.
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            let waited = started.elapsed();
+            gate.add_waited(waited);
+            gate.record_skip();
+            logger.log(
+                LogLevel::Warning,
+                &format!(
+                    "Skipping \"{schema}\".\"{table}\" — replication lag did not recover \
+                     within {:.0}s",
+                    waited.as_secs_f64()
+                ),
+            );
+            return Ok(LagGateVerdict::SkipTable);
+        }
+
+        // A signal must interrupt the sleep rather than be noticed after it.
+        tokio::select! {
+            _ = tokio::time::sleep(poll.min(remaining)) => {}
+            _ = shutdown_rx.changed() => {
+                gate.add_waited(started.elapsed());
+                logger.log(
+                    LogLevel::Warning,
+                    "Shutdown signal received while waiting for replication lag.",
+                );
+                return Ok(LagGateVerdict::ShutdownRequested);
+            }
+        }
+
+        let current = observe_replica_lag(client).await?;
+        let current_lag = current.max_lag_seconds().unwrap_or(0.0);
+
+        if !current.exceeds(gate.threshold_seconds) {
+            let waited = started.elapsed();
+            gate.add_waited(waited);
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "Replication lag recovered to {current_lag:.1}s after {:.0}s — proceeding \
+                     with \"{schema}\".\"{table}\"",
+                    waited.as_secs_f64()
+                ),
+            );
+            return Ok(LagGateVerdict::Proceed);
+        }
+
+        if started.elapsed() >= deadline {
+            let waited = started.elapsed();
+            gate.add_waited(waited);
+            gate.record_skip();
+            let worst = current
+                .worst_standby()
+                .map(describe_standby)
+                .unwrap_or_else(|| "unknown standby".to_string());
+            logger.log(
+                LogLevel::Warning,
+                &format!(
+                    "Skipping \"{schema}\".\"{table}\" — replication lag still {current_lag:.1}s \
+                     after waiting {:.0}s (worst: {worst})",
+                    waited.as_secs_f64()
+                ),
+            );
+            return Ok(LagGateVerdict::SkipTable);
+        }
+    }
+}
+
+/// Log the cluster's replication state once, before any maintenance runs.
+pub async fn log_initial_replica_lag(
+    client: &Client,
+    gate: &ReplicaLagGate,
+    logger: &Arc<Logger>,
+) -> Result<()> {
+    match observe_replica_lag(client).await? {
+        LagObservation::Unobservable => {
+            gate.disable();
+            logger.log(
+                LogLevel::Warning,
+                "Cannot observe replication lag — the connected role lacks pg_read_all_stats \
+                 (granted by pg_monitor). Lag gating is disabled for this run.",
+            );
+        }
+        LagObservation::NoReplicas => {
+            gate.disable();
+            logger.log(
+                LogLevel::Info,
+                "Replication-lag gating requested, but no replicas are streaming from this \
+                 server — gating is disabled for this run.",
+            );
+        }
+        observed @ LagObservation::Observed(_) => {
+            let detail = match &observed {
+                LagObservation::Observed(standbys) => standbys
+                    .iter()
+                    .map(describe_standby)
+                    .collect::<Vec<_>>()
+                    .join("; "),
+                _ => String::new(),
+            };
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "Replication-lag gating active at {:.1}s (max wait {}s) — {} standby(s): {}",
+                    gate.threshold_seconds,
+                    gate.max_wait_seconds,
+                    observed.standby_count(),
+                    detail
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
+// ─── Explicit table list (--also-tables) ──────────────────────────────────────
+
+const OP_VACUUM_ANALYZE: &str = "VACUUM ANALYZE";
+
+/// Narrow an explicit table list to the entries that can actually be maintained.
+///
+/// Two gates, each warning rather than failing so one bad entry cannot cost the
+/// operator the whole list:
+///   * the schema must be one of the resolved schemas, because the advisory lock
+///     is derived from exactly that list — maintaining outside it would run
+///     without the concurrency guard;
+///   * the table must exist.
+pub async fn resolve_explicit_tables(
+    client: &Client,
+    requested: &[ExplicitTable],
+    schemas: &[String],
+    logger: &Arc<Logger>,
+) -> Result<Vec<ExplicitTable>> {
+    if requested.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut in_scope: Vec<ExplicitTable> = Vec::new();
+    for t in requested {
+        if t.schema_name == crate::config::LOGBOOK_SCHEMA_NAME {
+            logger.log(
+                LogLevel::Warning,
+                &format!(
+                    "Ignoring \"{}\".\"{}\" — the {} schema is managed internally by pg-maintainer",
+                    t.schema_name,
+                    t.table_name,
+                    crate::config::LOGBOOK_SCHEMA_NAME
+                ),
+            );
+            continue;
+        }
+        if !schemas.contains(&t.schema_name) {
+            logger.log(
+                LogLevel::Warning,
+                &format!(
+                    "Ignoring \"{}\".\"{}\" — schema \"{}\" is not in the schema list for this \
+                     run; add it to --schema to include it",
+                    t.schema_name, t.table_name, t.schema_name
+                ),
+            );
+            continue;
+        }
+        in_scope.push(t.clone());
+    }
+
+    if in_scope.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let schema_names: Vec<String> = in_scope.iter().map(|t| t.schema_name.clone()).collect();
+    let table_names: Vec<String> = in_scope.iter().map(|t| t.table_name.clone()).collect();
+
+    let rows = client
+        .query(
+            queries::FIND_EXPLICIT_TABLES,
+            &[&schema_names, &table_names],
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to resolve --also-tables entries: {e}"))?;
+
+    let existing: std::collections::HashSet<(String, String)> = rows
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<_, String>("schema_name"),
+                row.get::<_, String>("table_name"),
+            )
+        })
+        .collect();
+
+    // Preserve the order the operator wrote, so the log reads the way the flag did.
+    let mut resolved = Vec::new();
+    for t in in_scope {
+        if existing.contains(&(t.schema_name.clone(), t.table_name.clone())) {
+            resolved.push(t);
+        } else {
+            logger.log(
+                LogLevel::Warning,
+                &format!(
+                    "Ignoring \"{}\".\"{}\" — no such table, materialized view or partitioned \
+                     table (names are matched exactly, and PostgreSQL folds unquoted identifiers \
+                     to lower case)",
+                    t.schema_name, t.table_name
+                ),
+            );
+        }
+    }
+
+    Ok(resolved)
+}
+
+/// VACUUM (ANALYZE) one table, reusing vacuum_table's before/after dead-tuple
+/// polling so the existing removal reporting works unchanged.
+async fn vacuum_analyze_table(
+    client: &Client,
+    schema: &str,
+    table: &str,
+    vacuum_opts: VacuumOptions,
+) -> Result<OperationResult, tokio_postgres::Error> {
+    let dead_before: i64 = client
+        .query_one(queries::GET_DEAD_TUPLE_COUNT, &[&schema, &table])
+        .await?
+        .get(0);
+
+    let mut opts = vec!["VERBOSE".to_string(), "ANALYZE".to_string()];
+    if !vacuum_opts.truncate {
+        opts.push("TRUNCATE FALSE".to_string());
+    }
+    if vacuum_opts.disable_page_skipping {
+        opts.push("DISABLE_PAGE_SKIPPING".to_string());
+    }
+    if vacuum_opts.skip_locked {
+        opts.push("SKIP_LOCKED".to_string());
+    }
+    let sql = format!(
+        "VACUUM ({}) \"{}\".\"{}\"",
+        opts.join(", "),
+        quote_ident(schema),
+        quote_ident(table)
+    );
+    client.execute(&sql, &[]).await?;
+
+    let dead_after: i64 = client
+        .query_one(queries::GET_DEAD_TUPLE_COUNT, &[&schema, &table])
+        .await?
+        .get(0);
+
+    let removed = vacuum_output::get_dead_tuples_removed(dead_before, dead_after);
+    Ok(OperationResult {
+        dead_tuples_before: if dead_before > 0 {
+            Some(dead_before)
+        } else {
+            None
+        },
+        dead_tuples_removed: removed,
+    })
+}
+
+/// Run VACUUM (ANALYZE) on every explicitly listed table, unconditionally.
+///
+/// No discovery criteria apply — that is the point of the flag. Tables already
+/// maintained by an earlier phase are skipped, and every safety mechanic
+/// (active-vacuum handling, lock_timeout, dry run, shutdown, lag gating) behaves
+/// exactly as it does in the discovery phases.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_also_tables(
+    client: &Client,
+    tables: &[ExplicitTable],
+    policy: RunPolicy,
+    already_handled: &std::collections::HashSet<(String, String)>,
+    logger: &Arc<Logger>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    vacuum_opts: VacuumOptions,
+    lag_gate: Option<&ReplicaLagGate>,
+) -> Result<OperationSummary> {
+    let mut summary = OperationSummary {
+        total: tables.len(),
+        ..Default::default()
+    };
+
+    if tables.is_empty() {
+        logger.log(
+            LogLevel::Success,
+            "No explicitly listed tables to maintain.",
+        );
+        return Ok(summary);
+    }
+
+    logger.log(
+        LogLevel::Info,
+        &format!("Maintaining {} explicitly listed table(s).", tables.len()),
+    );
+
+    for (i, t) in tables.iter().enumerate() {
+        if *shutdown_rx.borrow() {
+            logger.log(
+                LogLevel::Warning,
+                "Shutdown signal received — stopping after current table.",
+            );
+            break;
+        }
+
+        if already_handled.contains(&(t.schema_name.clone(), t.table_name.clone())) {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "Skipping \"{}\".\"{}\" — already handled by an earlier phase",
+                    t.schema_name, t.table_name
+                ),
+            );
+            summary.skipped += 1;
+            continue;
+        }
+
+        if let Some(gate) = lag_gate {
+            match wait_for_replica_lag(
+                client,
+                gate,
+                &t.schema_name,
+                &t.table_name,
+                policy,
+                logger,
+                shutdown_rx,
+            )
+            .await?
+            {
+                LagGateVerdict::Proceed => {}
+                LagGateVerdict::SkipTable => {
+                    summary.skipped += 1;
+                    continue;
+                }
+                LagGateVerdict::ShutdownRequested => break,
+            }
+        }
+
+        if let Some(gate) = lag_gate {
+            match wait_for_replica_lag(
+                client,
+                gate,
+                &t.schema_name,
+                &t.table_name,
+                policy,
+                logger,
+                shutdown_rx,
+            )
+            .await?
+            {
+                LagGateVerdict::Proceed => {}
+                LagGateVerdict::SkipTable => {
+                    summary.skipped += 1;
+                    continue;
+                }
+                LagGateVerdict::ShutdownRequested => break,
+            }
+        }
+
+        let proceed = handle_active_vacuums(
+            client,
+            &t.schema_name,
+            &t.table_name,
+            policy,
+            logger,
+            &mut summary,
+        )
+        .await?;
+
+        if !proceed {
+            continue;
+        }
+
+        if policy.dry_run {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "[DRY RUN] Would run: VACUUM (VERBOSE, ANALYZE) \"{}\".\"{}\"",
+                    t.schema_name, t.table_name
+                ),
+            );
+            continue;
+        }
+
+        logger.log_table_start(
+            i + 1,
+            tables.len(),
+            &t.schema_name,
+            &t.table_name,
+            OP_VACUUM_ANALYZE,
+        );
+        let start = Instant::now();
+        match vacuum_analyze_table(client, &t.schema_name, &t.table_name, vacuum_opts).await {
+            Ok(result) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
+                logger.log_table_success(
+                    &t.schema_name,
+                    &t.table_name,
+                    OP_VACUUM_ANALYZE,
+                    start.elapsed(),
+                );
+                if let Some(n) = result.dead_tuples_removed
+                    && n > 0
+                {
+                    logger.log(
+                        LogLevel::Info,
+                        &format!(
+                            "VACUUM (ANALYZE) on \"{}\".\"{}\" removed {n} dead tuple(s)",
+                            t.schema_name, t.table_name
+                        ),
+                    );
+                }
+                log_maintenance_operation(
+                    client,
+                    policy.dry_run,
+                    LogEntry {
+                        schema: &t.schema_name,
+                        table: &t.table_name,
+                        operation: OP_VACUUM_ANALYZE,
+                        mode: "also-tables",
+                        status: "success",
+                        dead_tuples_before: result.dead_tuples_before,
+                        dead_tuples_removed: result.dead_tuples_removed,
+                        duration_ms,
+                        error_message: None,
+                    },
+                )
+                .await;
+                summary.succeeded += 1;
+            }
+            Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
+                if is_lock_timeout(&e) {
+                    logger.log(
+                        LogLevel::Warning,
+                        &format!(
+                            "Skipping \"{}\".\"{}\" — could not acquire lock within 10ms",
+                            t.schema_name, t.table_name
+                        ),
+                    );
+                    summary.skipped += 1;
+                } else {
+                    logger.log_table_failed(
+                        &t.schema_name,
+                        &t.table_name,
+                        OP_VACUUM_ANALYZE,
+                        &e.to_string(),
+                    );
+                    log_maintenance_operation(
+                        client,
+                        policy.dry_run,
+                        LogEntry {
+                            schema: &t.schema_name,
+                            table: &t.table_name,
+                            operation: OP_VACUUM_ANALYZE,
+                            mode: "also-tables",
+                            status: "error",
+                            dead_tuples_before: None,
+                            dead_tuples_removed: None,
+                            duration_ms,
+                            error_message: Some(&e.to_string()),
+                        },
+                    )
+                    .await;
+                    summary.failed += 1;
+                }
+            }
+        }
+    }
+
+    Ok(summary)
 }

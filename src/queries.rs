@@ -339,3 +339,57 @@ pub const INSERT_MAINTENANCE_LOG: &str = r#"
     VALUES
       (now(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
 "#;
+
+/// Every standby currently streaming from this primary, with its replay lag.
+///
+/// `replay_lag` is the round trip the primary observes: from flushing WAL locally
+/// to the standby confirming it has replayed it. It is NULL when the standby is
+/// caught up and there is no recent WAL to measure against, which the caller
+/// treats as zero rather than as unknown.
+///
+/// An empty result means either "no replicas" or "this role cannot see the view";
+/// pair it with GET_CAN_READ_REPLICATION_STATS to tell those apart.
+///
+/// Parameters: none
+pub const GET_REPLICATION_LAG: &str = r#"
+    SELECT
+        COALESCE(application_name, '')          AS application_name,
+        COALESCE(state, '')                     AS state,
+        COALESCE(sync_state, '')                AS sync_state,
+        EXTRACT(EPOCH FROM replay_lag)::float8  AS replay_lag_seconds
+    FROM pg_stat_replication
+    ORDER BY replay_lag DESC NULLS LAST;
+"#;
+
+/// Whether the connected role may read pg_stat_replication's contents.
+///
+/// Without membership of pg_read_all_stats (which pg_monitor and superuser both
+/// confer) the view comes back empty, indistinguishable from a cluster with no
+/// replicas at all.
+///
+/// Parameters: none
+pub const GET_CAN_READ_REPLICATION_STATS: &str = r#"
+    SELECT pg_has_role(current_user, 'pg_read_all_stats', 'USAGE') AS can_read;
+"#;
+
+/// Which of the explicitly requested schema/table pairs actually exist.
+///
+/// Takes the request as two parallel arrays so the whole --also-tables list costs
+/// one round trip. Anything requested but not returned does not exist and is
+/// reported to the operator.
+///
+/// Accepts ordinary tables, materialized views and partitioned parents. Discovery
+/// excludes partitioned parents because their partitions are found individually,
+/// but an explicitly named parent is a deliberate request and VACUUM cascades.
+///
+/// Parameters:
+///   $1 = requested schema names (text[])
+///   $2 = requested table names, positionally paired with $1 (text[])
+pub const FIND_EXPLICIT_TABLES: &str = r#"
+    SELECT n.nspname AS schema_name,
+           c.relname AS table_name
+    FROM unnest($1::text[], $2::text[]) AS req(schema_name, table_name)
+    JOIN pg_namespace n ON n.nspname = req.schema_name
+    JOIN pg_class     c ON c.relnamespace = n.oid AND c.relname = req.table_name
+    WHERE c.relkind IN ('r', 'm', 'p');
+"#;
