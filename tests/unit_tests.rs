@@ -6,6 +6,7 @@ use pg_maintainer::config::{
     MAX_VACUUM_COST_LIMIT, MIN_VACUUM_COST_LIMIT,
 };
 use pg_maintainer::credentials::get_password_from_pgpass;
+use pg_maintainer::dsn::{self, ParsedDsn};
 use pg_maintainer::queries;
 use pg_maintainer::types::{
     BloatTableInfo, FreezeTableInfo, LogFormat, Mode, OperationSummary, SslMode, TableInfo,
@@ -13,6 +14,7 @@ use pg_maintainer::types::{
 };
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
+use std::str::FromStr;
 use tempfile::Builder;
 
 // ── SslMode ────────────────────────────────────────────────────────────────────
@@ -653,4 +655,335 @@ fn test_pgpass_escaped_colon_in_password() {
         get_password_from_pgpass("myhost", 5432, "mydb", "myuser").unwrap()
     });
     assert_eq!(password, Some("pass:word".to_string()));
+}
+
+// ── DSN parsing ───────────────────────────────────────────────────────────────
+
+fn parse_ok(s: &str) -> ParsedDsn {
+    dsn::parse(s).unwrap_or_else(|e| panic!("expected {s:?} to parse, got: {e}"))
+}
+
+#[test]
+fn test_dsn_full_uri_all_fields() {
+    let d = parse_ok("postgres://alice:s3cr3t@db.host:5433/mydb");
+    assert_eq!(d.host.as_deref(), Some("db.host"));
+    assert_eq!(d.port, Some(5433));
+    assert_eq!(d.database.as_deref(), Some("mydb"));
+    assert_eq!(d.username.as_deref(), Some("alice"));
+    assert_eq!(d.password.as_deref(), Some("s3cr3t"));
+}
+
+#[test]
+fn test_dsn_postgresql_scheme_also_accepted() {
+    let d = parse_ok("postgresql://alice@db.host/mydb");
+    assert_eq!(d.host.as_deref(), Some("db.host"));
+    assert_eq!(d.database.as_deref(), Some("mydb"));
+    assert_eq!(d.password, None);
+}
+
+#[test]
+fn test_dsn_keyword_string_all_fields() {
+    let d = parse_ok("host=db.host port=5433 dbname=mydb user=alice password=s3cr3t");
+    assert_eq!(d.host.as_deref(), Some("db.host"));
+    assert_eq!(d.port, Some(5433));
+    assert_eq!(d.database.as_deref(), Some("mydb"));
+    assert_eq!(d.username.as_deref(), Some("alice"));
+    assert_eq!(d.password.as_deref(), Some("s3cr3t"));
+}
+
+#[test]
+fn test_dsn_partial_uri_leaves_rest_unset() {
+    // Only a host: everything else must stay None so other sources can fill in.
+    let d = parse_ok("postgres://db.host");
+    assert_eq!(d.host.as_deref(), Some("db.host"));
+    assert_eq!(d.database, None);
+    assert_eq!(d.username, None);
+    assert_eq!(d.password, None);
+    assert_eq!(d.sslmode, None);
+}
+
+// ── Port presence ─────────────────────────────────────────────────────────────
+
+#[test]
+fn test_dsn_uri_without_port_reports_none() {
+    // The URI parser substitutes 5432; we must not mistake that for an explicit
+    // port, or a DSN would silently override PG_PORT.
+    assert_eq!(parse_ok("postgres://db.host/mydb").port, None);
+}
+
+#[test]
+fn test_dsn_uri_with_explicit_default_port_reports_it() {
+    assert_eq!(parse_ok("postgres://db.host:5432/mydb").port, Some(5432));
+}
+
+#[test]
+fn test_dsn_keyword_without_port_reports_none() {
+    assert_eq!(parse_ok("host=db.host dbname=mydb").port, None);
+}
+
+#[test]
+fn test_dsn_port_with_userinfo_containing_no_port() {
+    assert_eq!(parse_ok("postgres://alice:pw@db.host/mydb").port, None);
+    assert_eq!(
+        parse_ok("postgres://alice:pw@db.host:6000/mydb").port,
+        Some(6000)
+    );
+}
+
+#[test]
+fn test_dsn_ipv6_host_port_detection() {
+    let with_port = parse_ok("postgres://u@[::1]:5433/mydb");
+    assert_eq!(with_port.host.as_deref(), Some("::1"));
+    assert_eq!(with_port.port, Some(5433));
+
+    let without = parse_ok("postgres://u@[::1]/mydb");
+    assert_eq!(without.host.as_deref(), Some("::1"));
+    assert_eq!(without.port, None, "IPv6 colons must not read as a port");
+}
+
+// ── Passwords ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_dsn_percent_encoded_password() {
+    let d = parse_ok("postgres://alice:p%40ss%2Fword@db.host/mydb");
+    assert_eq!(d.password.as_deref(), Some("p@ss/word"));
+    assert_eq!(d.host.as_deref(), Some("db.host"));
+}
+
+#[test]
+fn test_dsn_keyword_quoted_password_with_space() {
+    let d = parse_ok("host=h dbname=d password='pass word'");
+    assert_eq!(d.password.as_deref(), Some("pass word"));
+}
+
+#[test]
+fn test_dsn_keyword_escaped_quote_in_password() {
+    let d = parse_ok(r"host=h password='pa\'ss'");
+    assert_eq!(d.password.as_deref(), Some("pa'ss"));
+}
+
+#[test]
+fn test_dsn_keyword_escaped_backslash_in_password() {
+    let d = parse_ok(r"host=h password='pa\\ss'");
+    assert_eq!(d.password.as_deref(), Some(r"pa\ss"));
+}
+
+// ── SSL parameters ────────────────────────────────────────────────────────────
+
+#[test]
+fn test_dsn_sslmode_all_supported_values() {
+    for (text, expected) in [
+        ("disable", SslMode::Disable),
+        ("require", SslMode::Require),
+        ("verify-ca", SslMode::VerifyCa),
+        ("verify-full", SslMode::VerifyFull),
+    ] {
+        let d = parse_ok(&format!("postgres://h/db?sslmode={text}"));
+        assert_eq!(d.sslmode, Some(expected), "sslmode={text}");
+    }
+}
+
+#[test]
+fn test_dsn_sslmode_verify_full_would_break_tokio_postgres_alone() {
+    // The whole reason SSL params are extracted before tokio-postgres sees them.
+    assert!(
+        tokio_postgres::Config::from_str("postgres://h/db?sslmode=verify-full").is_err(),
+        "if tokio-postgres ever accepts this, the pre-processing can be simplified"
+    );
+    assert_eq!(
+        parse_ok("postgres://h/db?sslmode=verify-full").sslmode,
+        Some(SslMode::VerifyFull)
+    );
+}
+
+#[test]
+fn test_dsn_sslmode_in_keyword_form() {
+    let d = parse_ok("host=h dbname=d sslmode=verify-ca");
+    assert_eq!(d.sslmode, Some(SslMode::VerifyCa));
+    assert_eq!(d.host.as_deref(), Some("h"));
+}
+
+#[test]
+fn test_dsn_sslmode_prefer_and_allow_rejected_by_name() {
+    for mode in ["prefer", "allow"] {
+        let err = dsn::parse(&format!("postgres://h/db?sslmode={mode}"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(mode), "{err}");
+        assert!(
+            err.contains("verify-full"),
+            "must name what is supported: {err}"
+        );
+    }
+}
+
+#[test]
+fn test_dsn_sslmode_unknown_rejected() {
+    assert!(dsn::parse("postgres://h/db?sslmode=banana").is_err());
+}
+
+#[test]
+fn test_dsn_certificate_paths_extracted() {
+    let d = parse_ok(
+        "postgres://h/db?sslmode=verify-full&sslrootcert=/etc/ca.pem\
+         &sslcert=/etc/client.pem&sslkey=/etc/client.key",
+    );
+    assert_eq!(d.sslmode, Some(SslMode::VerifyFull));
+    assert_eq!(d.ssl_ca_cert.as_deref(), Some("/etc/ca.pem"));
+    assert_eq!(d.ssl_client_cert.as_deref(), Some("/etc/client.pem"));
+    assert_eq!(d.ssl_client_key.as_deref(), Some("/etc/client.key"));
+    assert_eq!(d.host.as_deref(), Some("h"));
+    assert_eq!(d.database.as_deref(), Some("db"));
+}
+
+#[test]
+fn test_dsn_certificate_paths_in_keyword_form() {
+    let d = parse_ok("host=h dbname=db sslrootcert=/etc/ca.pem user=alice");
+    assert_eq!(d.ssl_ca_cert.as_deref(), Some("/etc/ca.pem"));
+    assert_eq!(d.username.as_deref(), Some("alice"));
+}
+
+#[test]
+fn test_dsn_percent_encoded_cert_path() {
+    let d = parse_ok("postgres://h/db?sslrootcert=%2Fetc%2Fmy%20certs%2Fca.pem");
+    assert_eq!(d.ssl_ca_cert.as_deref(), Some("/etc/my certs/ca.pem"));
+}
+
+#[test]
+fn test_dsn_non_ssl_params_survive_extraction() {
+    // Stripping the SSL params must not disturb the rest of the query string.
+    let d = parse_ok("postgres://h/db?sslmode=require&connect_timeout=7");
+    assert_eq!(d.sslmode, Some(SslMode::Require));
+    assert_eq!(d.connect_timeout_seconds, Some(7));
+}
+
+#[test]
+fn test_dsn_connect_timeout_extracted() {
+    assert_eq!(
+        parse_ok("postgres://h/db?connect_timeout=25").connect_timeout_seconds,
+        Some(25)
+    );
+    assert_eq!(parse_ok("postgres://h/db").connect_timeout_seconds, None);
+}
+
+// ── Ignored parameters ────────────────────────────────────────────────────────
+
+#[test]
+fn test_dsn_reports_ignored_params() {
+    let d = parse_ok("postgres://h/db?application_name=zzz&target_session_attrs=read-write");
+    assert!(d.ignored_params.contains(&"application_name".to_string()));
+    assert!(
+        d.ignored_params
+            .contains(&"target_session_attrs".to_string())
+    );
+}
+
+#[test]
+fn test_dsn_used_params_are_not_reported_as_ignored() {
+    let d = parse_ok("postgres://h/db?connect_timeout=7&sslmode=require");
+    assert!(d.ignored_params.is_empty(), "{:?}", d.ignored_params);
+}
+
+// ── Rejections ────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_dsn_multi_host_rejected() {
+    let err = dsn::parse("postgres://u@h1:5432,h2:5433/db")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("single host"), "{err}");
+}
+
+#[test]
+fn test_dsn_multi_host_rejected_keyword_form() {
+    assert!(dsn::parse("host=h1,h2 dbname=db").is_err());
+}
+
+#[test]
+fn test_dsn_garbage_rejected() {
+    assert!(dsn::parse("not-a-dsn").is_err());
+    assert!(dsn::parse("http://h/db").is_err());
+}
+
+#[test]
+fn test_dsn_empty_rejected() {
+    assert!(dsn::parse("").is_err());
+    assert!(dsn::parse("   ").is_err());
+}
+
+#[test]
+fn test_dsn_unterminated_quote_rejected() {
+    let err = dsn::parse("host=h password='unclosed")
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("unterminated"), "{err}");
+}
+
+#[test]
+fn test_dsn_keyword_missing_value_rejected() {
+    assert!(dsn::parse("host=h dbname").is_err());
+}
+
+#[test]
+fn test_dsn_unknown_param_rejected() {
+    // tokio-postgres rejects these, and the error should reach the operator.
+    assert!(dsn::parse("postgres://h/db?bogus_param=1").is_err());
+}
+
+// ── Unix sockets ──────────────────────────────────────────────────────────────
+
+#[test]
+fn test_dsn_unix_socket_host() {
+    let d = parse_ok("postgres:///mydb?host=/var/run/postgresql");
+    assert_eq!(d.host.as_deref(), Some("/var/run/postgresql"));
+    assert_eq!(d.database.as_deref(), Some("mydb"));
+}
+
+// ── Redaction ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_redact_uri_password() {
+    let out = dsn::redact("postgres://alice:s3cr3t@db.host:5433/mydb");
+    assert!(!out.contains("s3cr3t"), "{out}");
+    assert!(out.contains("alice"), "{out}");
+    assert!(out.contains("db.host"), "{out}");
+    assert!(out.contains("mydb"), "{out}");
+}
+
+#[test]
+fn test_redact_uri_without_password_is_unchanged() {
+    let raw = "postgres://alice@db.host/mydb";
+    assert_eq!(dsn::redact(raw), raw);
+}
+
+#[test]
+fn test_redact_uri_without_userinfo_is_unchanged() {
+    let raw = "postgres://db.host:5433/mydb";
+    assert_eq!(dsn::redact(raw), raw);
+}
+
+#[test]
+fn test_redact_keyword_password() {
+    let out = dsn::redact("host=h dbname=d password=s3cr3t user=alice");
+    assert!(!out.contains("s3cr3t"), "{out}");
+    assert!(out.contains("host=h"), "{out}");
+    assert!(out.contains("user=alice"), "{out}");
+}
+
+#[test]
+fn test_redact_keyword_quoted_password() {
+    let out = dsn::redact("host=h password='se cret'");
+    assert!(!out.contains("se cret"), "{out}");
+}
+
+#[test]
+fn test_redact_percent_encoded_password_leaves_nothing_behind() {
+    let out = dsn::redact("postgres://alice:p%40ss@db.host/mydb");
+    assert!(!out.contains("p%40ss"), "{out}");
+    assert!(!out.contains("p@ss"), "{out}");
+}
+
+#[test]
+fn test_redact_unparseable_falls_back_to_full_redaction() {
+    assert_eq!(dsn::redact("host=h password='unclosed"), "[REDACTED]");
 }

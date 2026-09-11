@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use pg_maintainer::config::{
-    DEFAULT_BLOAT_THRESHOLD_PCT, DEFAULT_MAINTENANCE_WORK_MEM_GB, DEFAULT_WRAPAROUND_MIN_AGE,
-    LOGBOOK_SCHEMA_NAME,
+    DEFAULT_BLOAT_THRESHOLD_PCT, DEFAULT_CONNECT_TIMEOUT_SECONDS, DEFAULT_MAINTENANCE_WORK_MEM_GB,
+    DEFAULT_WRAPAROUND_MIN_AGE, LOGBOOK_SCHEMA_NAME,
 };
 use pg_maintainer::connection::{self, ConnectionConfig};
 use pg_maintainer::logging::{LogLevel, Logger};
@@ -24,6 +24,15 @@ use tokio::sync::watch;
     long_about = None
 )]
 struct Args {
+    /// Full connection string: a postgres:// URI or a libpq keyword string.
+    /// Individual connection flags override the matching DSN component.
+    #[arg(
+        long,
+        value_name = "URI",
+        help = "Connection string (postgres:// URI or libpq keyword string), or PG_DSN env var"
+    )]
+    dsn: Option<String>,
+
     /// PostgreSQL host (or PG_HOST env var)
     #[arg(short = 'H', long)]
     host: Option<String>,
@@ -224,7 +233,7 @@ struct Args {
 
     /// TCP connection timeout in seconds (default: 10).
     /// A network partition can hang startup for the OS default; this bounds that.
-    #[arg(long, default_value = "10")]
+    #[arg(long, default_value_t = DEFAULT_CONNECT_TIMEOUT_SECONDS)]
     connect_timeout_seconds: u64,
 
     // ── VACUUM options ──────────────────────────────────────────────────────────
@@ -255,6 +264,7 @@ struct Args {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 struct Config {
+    dsn: Option<String>,
     host: Option<String>,
     port: Option<u16>,
     database: Option<String>,
@@ -313,11 +323,15 @@ fn load_config_file(path: &str) -> Result<Config> {
     let mut cfg = toml::from_str::<Config>(&content)
         .with_context(|| format!("Failed to parse TOML configuration file: {path}"))?;
     cfg.password = resolve_env_interpolation(cfg.password);
+    cfg.dsn = resolve_env_interpolation(cfg.dsn);
     Ok(cfg)
 }
 
 /// Merge TOML config into args. CLI args always win (only fill in unset fields).
 fn merge_config(file: Config, mut args: Args) -> Args {
+    if args.dsn.is_none() {
+        args.dsn = file.dsn;
+    }
     if args.host.is_none() {
         args.host = file.host;
     }
@@ -437,7 +451,7 @@ fn merge_config(file: Config, mut args: Args) -> Args {
     {
         args.statement_timeout_seconds = v;
     }
-    if args.connect_timeout_seconds == 10
+    if args.connect_timeout_seconds == DEFAULT_CONNECT_TIMEOUT_SECONDS
         && let Some(v) = file.connect_timeout_seconds
     {
         args.connect_timeout_seconds = v;
@@ -458,6 +472,80 @@ fn merge_config(file: Config, mut args: Args) -> Args {
     args
 }
 
+// ─── DSN ─────────────────────────────────────────────────────────────────────
+
+/// What applying a DSN produced, for logging and warnings once the logger exists.
+#[derive(Default)]
+struct DsnOutcome {
+    /// The DSN with its password masked. Never hold the raw value here.
+    redacted: Option<String>,
+    ignored_params: Vec<String>,
+    password_from_dsn: bool,
+}
+
+/// Fill connection fields that are still unset from a DSN.
+///
+/// Runs after `merge_config()`, so an individually-named setting from either the
+/// command line or the config file always beats the same setting bundled inside a
+/// DSN. The DSN in turn outranks the `PG_*` env vars, which
+/// `ConnectionConfig::from_args()` consults for whatever is still `None`.
+fn apply_dsn(mut args: Args) -> Result<(Args, DsnOutcome)> {
+    let Some(raw) = pg_maintainer::dsn::resolve_dsn_source(args.dsn.clone())? else {
+        return Ok((args, DsnOutcome::default()));
+    };
+
+    let parsed = pg_maintainer::dsn::parse(&raw)?;
+    let mut outcome = DsnOutcome {
+        redacted: Some(pg_maintainer::dsn::redact(&raw)),
+        ignored_params: parsed.ignored_params.clone(),
+        password_from_dsn: false,
+    };
+
+    if args.host.is_none() {
+        args.host = parsed.host;
+    }
+    if args.port.is_none() {
+        args.port = parsed.port;
+    }
+    if args.database.is_none() {
+        args.database = parsed.database;
+    }
+    if args.username.is_none() {
+        args.username = parsed.username;
+    }
+    if args.password.is_none()
+        && let Some(pw) = parsed.password
+    {
+        args.password = Some(pw);
+        outcome.password_from_dsn = true;
+    }
+
+    // sslmode and connect_timeout_seconds are not Option, so "unset" can only be
+    // detected as "still at the clap default" — the same compromise merge_config()
+    // makes for the TOML file.
+    if args.sslmode == SslMode::Disable
+        && let Some(mode) = parsed.sslmode
+    {
+        args.sslmode = mode;
+    }
+    if args.ssl_ca_cert.is_none() {
+        args.ssl_ca_cert = parsed.ssl_ca_cert;
+    }
+    if args.ssl_client_cert.is_none() {
+        args.ssl_client_cert = parsed.ssl_client_cert;
+    }
+    if args.ssl_client_key.is_none() {
+        args.ssl_client_key = parsed.ssl_client_key;
+    }
+    if args.connect_timeout_seconds == DEFAULT_CONNECT_TIMEOUT_SECONDS
+        && let Some(secs) = parsed.connect_timeout_seconds
+    {
+        args.connect_timeout_seconds = secs;
+    }
+
+    Ok((args, outcome))
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -476,6 +564,19 @@ async fn main() -> Result<()> {
     if let Some(ref path) = args.config.clone() {
         let file_cfg = load_config_file(path).context("Failed to load configuration file")?;
         args = merge_config(file_cfg, args);
+    }
+
+    // Fill anything still unset from --dsn / PG_DSN. Runs after the config file so
+    // that individually-named settings always beat DSN-bundled ones.
+    let dsn_outcome;
+    (args, dsn_outcome) = apply_dsn(args).context("Failed to apply connection string")?;
+
+    if dsn_outcome.password_from_dsn {
+        eprintln!(
+            "Warning: the connection string contains a password, which is insecure \
+             (visible in process list and shell history). \
+             Use the PG_PASSWORD environment variable instead."
+        );
     }
 
     // Validate: need either --schema or --discover-all-schemas
@@ -648,6 +749,22 @@ async fn main() -> Result<()> {
     )?;
 
     let conn_string = conn_cfg.build_connection_string();
+
+    if let Some(ref redacted) = dsn_outcome.redacted {
+        logger.log(
+            LogLevel::Info,
+            &format!("Using connection string: {redacted}"),
+        );
+        if !dsn_outcome.ignored_params.is_empty() {
+            logger.log(
+                LogLevel::Warning,
+                &format!(
+                    "Ignoring connection string parameter(s) not used by pg-maintainer: {}",
+                    dsn_outcome.ignored_params.join(", ")
+                ),
+            );
+        }
+    }
 
     logger.log(
         LogLevel::Info,

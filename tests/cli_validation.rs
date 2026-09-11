@@ -1143,3 +1143,273 @@ vacuum-cost-limit = 50000
         .failure()
         .stderr(predicate::str::contains("--vacuum-cost-limit"));
 }
+
+// ── Connection string (--dsn / PG_DSN) ─────────────────────────────────────────
+
+#[test]
+fn test_dsn_uri_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("postgres://alice@db.host:5433/mydb")
+        .env_clear()
+        .assert()
+        // Parses and validates; only the DB connection fails
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_dsn_keyword_string_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("host=db.host port=5433 dbname=mydb user=alice")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_dsn_env_var_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .env_clear()
+        .env("PG_DSN", "postgres://alice@db.host/mydb")
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_dsn_invalid_fails_before_connecting() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("not-a-dsn")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("postgres:// URI"));
+}
+
+#[test]
+fn test_dsn_unsupported_sslmode_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("postgres://h/db?sslmode=prefer")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("sslmode"))
+        .stderr(predicate::str::contains("verify-full"));
+}
+
+#[test]
+fn test_dsn_multi_host_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("postgres://h1:5432,h2:5433/db")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("single host"));
+}
+
+#[test]
+fn test_dsn_password_emits_insecurity_warning() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("postgres://alice:s3cr3t@db.host/mydb")
+        .env_clear()
+        .assert()
+        .stderr(predicate::str::contains(
+            "connection string contains a password",
+        ));
+}
+
+#[test]
+fn test_dsn_without_password_no_warning() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("postgres://alice@db.host/mydb")
+        .env_clear()
+        .assert()
+        .stderr(predicate::str::contains("contains a password").not());
+}
+
+#[test]
+fn test_dsn_password_never_appears_in_output() {
+    // The raw DSN must never reach stdout or the log; only a redacted form may.
+    let out = cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("postgres://alice:hunter2@db.host/mydb")
+        .env_clear()
+        .output()
+        .unwrap();
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !combined.contains("hunter2"),
+        "password leaked into output:\n{combined}"
+    );
+}
+
+#[test]
+fn test_explicit_flags_override_dsn_components() {
+    // --database must win over the DSN's dbname. The startup log names the database
+    // actually used, which is how the precedence is observable without a server.
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("postgres://alice@127.0.0.1:1/from_dsn")
+        .arg("--database")
+        .arg("from_flag")
+        .arg("--log-file")
+        .arg("/dev/null")
+        .env_clear()
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "Connecting to database 'from_flag'",
+        ));
+}
+
+#[test]
+fn test_dsn_fills_fields_not_given_as_flags() {
+    // The complement of the test above: with no --database, the DSN's dbname is used.
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("postgres://alice@127.0.0.1:1/from_dsn")
+        .arg("--log-file")
+        .arg("/dev/null")
+        .env_clear()
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "Connecting to database 'from_dsn'",
+        ));
+}
+
+#[test]
+fn test_dsn_outranks_env_vars() {
+    // Documented precedence: DSN components beat PG_* env vars.
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("postgres://alice@127.0.0.1:1/from_dsn")
+        .arg("--log-file")
+        .arg("/dev/null")
+        .env_clear()
+        .env("PG_DATABASE", "from_env")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "Connecting to database 'from_dsn'",
+        ));
+}
+
+#[test]
+fn test_env_var_fills_what_dsn_omits() {
+    // A DSN with no dbname leaves the field open for PG_DATABASE.
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("postgres://alice@127.0.0.1:1")
+        .arg("--log-file")
+        .arg("/dev/null")
+        .env_clear()
+        .env("PG_DATABASE", "from_env")
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains(
+            "Connecting to database 'from_env'",
+        ));
+}
+
+#[test]
+fn test_dsn_ignored_params_warned_about() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dsn")
+        .arg("postgres://alice@127.0.0.1:1/db?application_name=zzz")
+        .arg("--log-file")
+        .arg("/dev/null")
+        .env_clear()
+        .assert()
+        .failure()
+        .stdout(predicate::str::contains("application_name"))
+        .stdout(predicate::str::contains("Ignoring connection string"));
+}
+
+#[test]
+fn test_help_contains_dsn() {
+    cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--dsn"));
+}
+
+#[test]
+fn test_config_file_with_dsn_key() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+dsn = "postgres://alice@db.host:5433/mydb"
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_config_file_dsn_env_interpolation() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+dsn = "${{MY_TEST_DSN}}"
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .env("MY_TEST_DSN", "postgres://alice@db.host/mydb")
+        .assert()
+        .code(predicate::ne(2));
+}

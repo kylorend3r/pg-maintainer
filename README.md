@@ -28,6 +28,7 @@ A single-threaded PostgreSQL table maintenance tool written in Rust. It runs fiv
 - [Options](#options)
 - [Command Line Interface](#command-line-interface)
 - [Key Features](#key-features)
+- [Connection Strings](#connection-strings-dsn)
 - [I/O Throttling](#io-throttling-running-gently)
 - [Integration Testing](#integration-testing)
 - [Config File](#config-file)
@@ -141,6 +142,9 @@ pg-maintainer -d mydb -s public --gentle
 # Same, with a hand-picked cost pair
 pg-maintainer -d mydb -s public --vacuum-cost-delay-ms 20 --vacuum-cost-limit 400
 
+# Pass the whole connection as one string
+pg-maintainer -s public --dsn "postgres://maintainer@db.internal:5432/mydb"
+
 # SSL connection to a remote server
 pg-maintainer -d mydb -s public -H prod-db.company.com --sslmode verify-full --ssl-ca-cert /path/to/ca.pem
 
@@ -151,6 +155,7 @@ pg-maintainer -C config.toml
 ## Environment Variables
 
 ```bash
+export PG_DSN="postgres://maintainer@db.internal:5432/mydb"  # or the individual vars below
 export PG_HOST=localhost
 export PG_PORT=5432
 export PG_DATABASE=mydb
@@ -164,15 +169,18 @@ export PG_PASSWORD_FILE=/run/secrets/pg_password
 export PGPASSFILE=/path/to/.pgpass
 ```
 
-Password resolution order: `--password` (CLI, emits an insecurity warning) → `PG_PASSWORD` → `PG_PASSWORD_FILE` → `.pgpass`/`$PGPASSFILE` → none.
+Password resolution order: `--password` (CLI, emits an insecurity warning) → a password inside `--dsn`/`PG_DSN` (same warning) → `PG_PASSWORD` → `PG_PASSWORD_FILE` → `.pgpass`/`$PGPASSFILE` → none.
 
-Overall configuration precedence: CLI arguments → TOML config file (`-C`) → environment variables → defaults.
+Overall configuration precedence: CLI arguments → TOML config file (`-C`) → connection string (`--dsn`) → environment variables → defaults.
+
+A connection string sits below individually-named settings, so an explicit `--database` always beats the `dbname` bundled in a DSN. See [Connection strings](#connection-strings-dsn).
 
 ## Options
 
 ### Connection
 | Flag | Env var | Default |
 |---|---|---|
+| `--dsn` | `PG_DSN` | — |
 | `-H, --host` | `PG_HOST` | `localhost` |
 | `-p, --port` | `PG_PORT` | `5432` |
 | `-d, --database` | `PG_DATABASE` | `postgres` |
@@ -240,6 +248,8 @@ pg-maintainer — PostgreSQL table maintenance: vacuum, analyze, and anti-wrapar
 Usage: pg-maintainer [OPTIONS]
 
 Options:
+      --dsn <URI>
+          Connection string (postgres:// URI or libpq keyword string), or PG_DSN env var
   -H, --host <HOST>
           PostgreSQL host (or PG_HOST env var)
   -p, --port <PORT>
@@ -324,6 +334,7 @@ Options:
 - **Graceful shutdown**: SIGTERM and SIGINT signal handlers stop after the current table, run the final summary, and exit cleanly
 - **Fast-fail locking**: 10ms `lock_timeout` for the session so runs never block indefinitely behind another process's lock
 - **Automatic session tuning**: `vacuum_buffer_usage_limit` is set to 1/16 of `shared_buffers` (PostgreSQL 16+) and `max_parallel_maintenance_workers` is raised to match the server's `max_parallel_workers`, so VACUUM's index-cleanup phase can use the full parallel worker pool instead of the low built-in default. Both are session-scoped `SET`s, no server config changes required. Neither affects Phase 3 (freeze), which runs with `INDEX_CLEANUP FALSE`.
+- **Connection strings**: pass a single `postgres://` URI or libpq keyword string via `--dsn` / `PG_DSN`, instead of five separate flags. TLS parameters included. See [Connection strings](#connection-strings-dsn).
 - **I/O throttling**: `--gentle` (or explicit `--vacuum-cost-delay-ms`/`--vacuum-cost-limit`) makes maintenance yield to production traffic instead of running as fast as the storage allows. Opt-in; the speed tuning above stays the default. See [I/O throttling](#io-throttling-running-gently).
 - **Wraparound tuning**: flag candidates by absolute XID age (`--wraparound-min-age`) or by percentage of `autovacuum_freeze_max_age` (`--wraparound-pct`)
 - **SSL/TLS**: `disable`/`require`/`verify-ca`/`verify-full`, with custom CA and mutual TLS support
@@ -331,6 +342,53 @@ Options:
 - **Config file**: TOML configuration with env-var interpolation (`password = "${PG_PASSWORD}"`) and CLI override support
 - **Structured logging**: text or JSON log format, optional silence mode, buffered file + stdout output
 - **Dry run**: preview every VACUUM/ANALYZE candidate and command before anything executes
+
+## Connection Strings (DSN)
+
+Instead of five separate connection flags, pass one string with `--dsn`, the
+`PG_DSN` environment variable, or a `dsn` key in the config file. Both the URI and
+the libpq keyword form are accepted:
+
+```bash
+pg-maintainer -s public --dsn "postgres://maintainer@db.internal:5432/mydb"
+pg-maintainer -s public --dsn "host=db.internal port=5432 dbname=mydb user=maintainer"
+
+# From a secrets manager or an operator, via the environment
+export PG_DSN="postgres://maintainer@db.internal/mydb?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem"
+pg-maintainer -s public
+```
+
+**Precedence.** A DSN fills in only what you have not set individually, so
+`--dsn "postgres://h/from_dsn" --database from_flag` connects to `from_flag`. The
+DSN in turn outranks the `PG_*` environment variables, matching how the config file
+already behaves. This means you can keep a base DSN in the environment and override
+one field on the command line.
+
+**TLS parameters are honored.** These four map onto the flags of the same meaning,
+so a DSN copied from `psql` works unchanged:
+
+| DSN parameter | Equivalent flag |
+|---|---|
+| `sslmode` | `--sslmode` |
+| `sslrootcert` | `--ssl-ca-cert` |
+| `sslcert` | `--ssl-client-cert` |
+| `sslkey` | `--ssl-client-key` |
+
+`sslmode=allow` and `sslmode=prefer` are rejected rather than approximated.
+pg-maintainer either connects in plaintext or requires TLS, with no opportunistic
+mode, and silently picking either one would change the security of the connection.
+Use `disable`, `require`, `verify-ca`, or `verify-full`.
+
+**Passwords.** A password inside a DSN is as exposed in the process list as
+`--password` is, so it triggers the same warning. Prefer leaving it out and
+supplying it through `PG_PASSWORD`, `PG_PASSWORD_FILE`, or `.pgpass`. The DSN is
+never logged in raw form; only a masked version appears, as
+`postgres://user:***@host:5432/db`.
+
+**Not supported.** Multi-host failover strings such as `host=h1,h2` are rejected,
+since the tool connects to exactly one server and silently dropping the second host
+would be worse than an error. Parameters that parse but that the tool does not act
+on, such as `application_name`, are logged as a warning rather than ignored quietly.
 
 ## I/O Throttling (Running Gently)
 
@@ -448,6 +506,7 @@ docker compose -f docker-compose.test.yml exec -T postgres \
   psql -U pgm_test -d pgm_test -f schema/setup_test_schema.sql
 
 # Connect and test pg-maintainer
+export PG_DSN="postgres://maintainer@db.internal:5432/mydb"  # or the individual vars below
 export PG_HOST=localhost PG_PORT=5432 PG_DATABASE=pgm_test \
        PG_USER=pgm_test PG_PASSWORD=pgm_test
 

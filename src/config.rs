@@ -3,6 +3,7 @@ pub const DEFAULT_POSTGRES_HOST: &str = "localhost";
 pub const DEFAULT_POSTGRES_PORT: u16 = 5432;
 pub const DEFAULT_POSTGRES_DATABASE: &str = "postgres";
 pub const DEFAULT_POSTGRES_USERNAME: &str = "postgres";
+pub const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 
 // Maintenance work memory
 pub const DEFAULT_MAINTENANCE_WORK_MEM_GB: u64 = 1;
