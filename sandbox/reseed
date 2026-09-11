@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# Rebuild the demo tables from scratch, undoing whatever a pg-maintainer run did.
+set -euo pipefail
+exec gosu postgres psql -v ON_ERROR_STOP=1 -q -d "${SANDBOX_DB:-demo}" -f /opt/sandbox/seed.sql
