@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# The table state pg-maintainer's discovery queries look at.
+set -euo pipefail
+exec gosu postgres psql -d "${SANDBOX_DB:-demo}" -c "
+SELECT s.schemaname           AS schema,
+       s.relname              AS table_name,
+       n_live_tup             AS live_rows,
+       n_dead_tup             AS dead_rows,
+       CASE WHEN n_live_tup + n_dead_tup = 0 THEN 0
+            ELSE round(100.0 * n_dead_tup / (n_live_tup + n_dead_tup), 1)
+       END                    AS pct_bloat,
+       n_mod_since_analyze    AS mods_since_analyze,
+       age(c.relfrozenxid)    AS xid_age,
+       s.last_vacuum, s.last_analyze
+FROM pg_stat_user_tables s
+JOIN pg_class c ON c.oid = s.relid
+ORDER BY s.schemaname, s.relname;"
