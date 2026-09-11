@@ -28,8 +28,6 @@ A single-threaded PostgreSQL table maintenance tool written in Rust. It runs fiv
 - [Options](#options)
 - [Command Line Interface](#command-line-interface)
 - [Key Features](#key-features)
-- [Connection Strings](#connection-strings-dsn)
-- [I/O Throttling](#io-throttling-running-gently)
 - [Integration Testing](#integration-testing)
 - [Config File](#config-file)
 - [License](#license)
@@ -173,7 +171,7 @@ Password resolution order: `--password` (CLI, emits an insecurity warning) → a
 
 Overall configuration precedence: CLI arguments → TOML config file (`-C`) → connection string (`--dsn`) → environment variables → defaults.
 
-A connection string sits below individually-named settings, so an explicit `--database` always beats the `dbname` bundled in a DSN. See [Connection strings](#connection-strings-dsn).
+A connection string sits below individually-named settings, so an explicit `--database` always beats the `dbname` bundled in a DSN.
 
 ## Options
 
@@ -217,8 +215,6 @@ A connection string sits below individually-named settings, so an explicit `--da
 | `--gentle` | Preset for background maintenance: `vacuum_cost_delay` 10 ms, `vacuum_cost_limit` 200 |
 | `--vacuum-cost-delay-ms` | Session `vacuum_cost_delay` in ms, `0`–`100` (default: inherit the server's value) |
 | `--vacuum-cost-limit` | Session `vacuum_cost_limit`, `1`–`10000` (default: inherit the server's value) |
-
-See [I/O throttling](#io-throttling-running-gently) for how these interact.
 
 ### SSL
 | Flag | Description |
@@ -334,107 +330,14 @@ Options:
 - **Graceful shutdown**: SIGTERM and SIGINT signal handlers stop after the current table, run the final summary, and exit cleanly
 - **Fast-fail locking**: 10ms `lock_timeout` for the session so runs never block indefinitely behind another process's lock
 - **Automatic session tuning**: `vacuum_buffer_usage_limit` is set to 1/16 of `shared_buffers` (PostgreSQL 16+) and `max_parallel_maintenance_workers` is raised to match the server's `max_parallel_workers`, so VACUUM's index-cleanup phase can use the full parallel worker pool instead of the low built-in default. Both are session-scoped `SET`s, no server config changes required. Neither affects Phase 3 (freeze), which runs with `INDEX_CLEANUP FALSE`.
-- **Connection strings**: pass a single `postgres://` URI or libpq keyword string via `--dsn` / `PG_DSN`, instead of five separate flags. TLS parameters included. See [Connection strings](#connection-strings-dsn).
-- **I/O throttling**: `--gentle` (or explicit `--vacuum-cost-delay-ms`/`--vacuum-cost-limit`) makes maintenance yield to production traffic instead of running as fast as the storage allows. Opt-in; the speed tuning above stays the default. See [I/O throttling](#io-throttling-running-gently).
+- **Connection strings**: pass a single `postgres://` URI or libpq keyword string via `--dsn` / `PG_DSN`, instead of five separate flags. TLS parameters (`sslmode`, `sslrootcert`, `sslcert`, `sslkey`) are honored.
+- **I/O throttling**: `--gentle` (or explicit `--vacuum-cost-delay-ms`/`--vacuum-cost-limit`) makes maintenance yield to production traffic instead of running as fast as the storage allows. Opt-in; the speed tuning above stays the default.
 - **Wraparound tuning**: flag candidates by absolute XID age (`--wraparound-min-age`) or by percentage of `autovacuum_freeze_max_age` (`--wraparound-pct`)
 - **SSL/TLS**: `disable`/`require`/`verify-ca`/`verify-full`, with custom CA and mutual TLS support
 - **Multiple credential sources**: `PG_PASSWORD`, `PG_PASSWORD_FILE` (Docker/Kubernetes secrets), `.pgpass`/`$PGPASSFILE`, or CLI flag
 - **Config file**: TOML configuration with env-var interpolation (`password = "${PG_PASSWORD}"`) and CLI override support
 - **Structured logging**: text or JSON log format, optional silence mode, buffered file + stdout output
 - **Dry run**: preview every VACUUM/ANALYZE candidate and command before anything executes
-
-## Connection Strings (DSN)
-
-Instead of five separate connection flags, pass one string with `--dsn`, the
-`PG_DSN` environment variable, or a `dsn` key in the config file. Both the URI and
-the libpq keyword form are accepted:
-
-```bash
-pg-maintainer -s public --dsn "postgres://maintainer@db.internal:5432/mydb"
-pg-maintainer -s public --dsn "host=db.internal port=5432 dbname=mydb user=maintainer"
-
-# From a secrets manager or an operator, via the environment
-export PG_DSN="postgres://maintainer@db.internal/mydb?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem"
-pg-maintainer -s public
-```
-
-**Precedence.** A DSN fills in only what you have not set individually, so
-`--dsn "postgres://h/from_dsn" --database from_flag` connects to `from_flag`. The
-DSN in turn outranks the `PG_*` environment variables, matching how the config file
-already behaves. This means you can keep a base DSN in the environment and override
-one field on the command line.
-
-**TLS parameters are honored.** These four map onto the flags of the same meaning,
-so a DSN copied from `psql` works unchanged:
-
-| DSN parameter | Equivalent flag |
-|---|---|
-| `sslmode` | `--sslmode` |
-| `sslrootcert` | `--ssl-ca-cert` |
-| `sslcert` | `--ssl-client-cert` |
-| `sslkey` | `--ssl-client-key` |
-
-`sslmode=allow` and `sslmode=prefer` are rejected rather than approximated.
-pg-maintainer either connects in plaintext or requires TLS, with no opportunistic
-mode, and silently picking either one would change the security of the connection.
-Use `disable`, `require`, `verify-ca`, or `verify-full`.
-
-**Passwords.** A password inside a DSN is as exposed in the process list as
-`--password` is, so it triggers the same warning. Prefer leaving it out and
-supplying it through `PG_PASSWORD`, `PG_PASSWORD_FILE`, or `.pgpass`. The DSN is
-never logged in raw form; only a masked version appears, as
-`postgres://user:***@host:5432/db`.
-
-**Not supported.** Multi-host failover strings such as `host=h1,h2` are rejected,
-since the tool connects to exactly one server and silently dropping the second host
-would be worse than an error. Parameters that parse but that the tool does not act
-on, such as `application_name`, are logged as a warning rather than ignored quietly.
-
-## I/O Throttling (Running Gently)
-
-PostgreSQL's default `vacuum_cost_delay` for a *manual* `VACUUM` is `0`, which means
-no throttling: a `VACUUM` pg-maintainer issues will consume as much I/O as the
-storage can deliver. On a busy OLTP server that is often the wrong trade. These
-flags turn on PostgreSQL's cost-based delay for the session:
-
-```bash
-# Conservative preset — vacuum_cost_delay 10ms, vacuum_cost_limit 200
-pg-maintainer -d mydb -s public --gentle
-
-# Explicit values
-pg-maintainer -d mydb -s public --vacuum-cost-delay-ms 20 --vacuum-cost-limit 400
-
-# --gentle, but with a larger budget: the explicit value wins over the preset
-pg-maintainer -d mydb -s public --gentle --vacuum-cost-limit 400
-```
-
-How it works: PostgreSQL charges each buffer access a cost (`1` for a hit, `2` for a
-miss, `20` for dirtying a page). Once a run has spent `vacuum_cost_limit` credits it
-sleeps for `vacuum_cost_delay` milliseconds. A smaller limit or a longer delay means
-less I/O per unit of wall-clock time, and a proportionally longer run.
-
-Things worth knowing:
-
-- **Applies to every mode, and to `ANALYZE` too.** Both are session-scoped `SET`s
-  issued once after connecting. PostgreSQL's cost accounting covers `ANALYZE`
-  whenever `vacuum_cost_delay` is non-zero. Small tables (the typical
-  `never-vacuumed`/`never-analyzed` candidates) never accumulate enough credits to
-  sleep, so throttling them costs nothing.
-- **`--vacuum-cost-delay-ms 0` is an explicit disable**, not "leave it alone". Use it
-  to override a `vacuum_cost_delay` set in `postgresql.conf`. Omitting the flag
-  entirely is what inherits the server's value.
-- **Throttling coexists with the automatic speed tuning** — it does not switch off
-  `maintenance_work_mem`, `vacuum_buffer_usage_limit`, or the parallel worker boost.
-  The first two are memory knobs and are orthogonal to I/O rate; a large
-  `maintenance_work_mem` is still worth having, because it means fewer index passes.
-- **Parallel workers and throttling.** PostgreSQL shares one cost budget across all
-  parallel vacuum workers rather than giving each its own, so the extra workers
-  cannot push I/O past your configured limit — but they cannot make a throttled run
-  faster either. pg-maintainer logs a warning when both are active so this is not a
-  surprise. If you want the workers to be useful, drop the throttle.
-- **Throttled runs take longer.** Pair `--gentle` with a generous or absent
-  `--statement-timeout-seconds`, and check that a throttled run still fits inside
-  its cron/CronJob window.
 
 ## Production Notes
 
