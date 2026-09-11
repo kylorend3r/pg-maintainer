@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use pg_maintainer::config::{
     DEFAULT_BLOAT_THRESHOLD_PCT, DEFAULT_CONNECT_TIMEOUT_SECONDS, DEFAULT_MAINTENANCE_WORK_MEM_GB,
-    DEFAULT_WRAPAROUND_MIN_AGE, LOGBOOK_SCHEMA_NAME,
+    DEFAULT_REPLICA_LAG_WAIT_SECONDS, DEFAULT_WRAPAROUND_MIN_AGE, LOGBOOK_SCHEMA_NAME,
 };
 use pg_maintainer::connection::{self, ConnectionConfig};
 use pg_maintainer::logging::{LogLevel, Logger};
@@ -195,6 +195,36 @@ struct Args {
     )]
     gentle: bool,
 
+    // ── Replication lag ──────────────────────────────────────────────────────
+    /// Hold maintenance on each table while any standby's replay lag exceeds this
+    /// many seconds. Omit to disable lag gating entirely.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        help = "Wait before each table while replica replay lag exceeds this (default: no gating)"
+    )]
+    max_replica_lag_seconds: Option<f64>,
+
+    /// How long to wait for lag to recover before skipping a table. 0 skips immediately.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value_t = DEFAULT_REPLICA_LAG_WAIT_SECONDS,
+        help = "Max wait per table for replica lag to recover; 0 = skip immediately"
+    )]
+    max_replica_lag_wait_seconds: u64,
+
+    // ── Explicit table list ──────────────────────────────────────────────────
+    /// Schema-qualified tables to VACUUM (ANALYZE) after the selected modes finish,
+    /// in addition to them. Unconditional: no discovery criteria apply.
+    #[arg(
+        long,
+        value_delimiter = ',',
+        value_name = "SCHEMA.TABLE,...",
+        help = "Also VACUUM (ANALYZE) these schema-qualified tables after the selected modes"
+    )]
+    also_tables: Option<Vec<String>>,
+
     // ── SSL ──────────────────────────────────────────────────────────────────
     #[arg(long, default_value = "disable", value_parser = clap::value_parser!(SslMode))]
     sslmode: SslMode,
@@ -289,6 +319,9 @@ struct Config {
     vacuum_cost_delay_ms: Option<f64>,
     vacuum_cost_limit: Option<i32>,
     gentle: Option<bool>,
+    max_replica_lag_seconds: Option<f64>,
+    max_replica_lag_wait_seconds: Option<u64>,
+    also_tables: Option<Vec<String>>,
     sslmode: Option<String>,
     ssl_ca_cert: Option<String>,
     ssl_client_cert: Option<String>,
@@ -413,6 +446,18 @@ fn merge_config(file: Config, mut args: Args) -> Args {
     }
     if !args.gentle {
         args.gentle = file.gentle.unwrap_or(false);
+    }
+
+    if args.max_replica_lag_seconds.is_none() {
+        args.max_replica_lag_seconds = file.max_replica_lag_seconds;
+    }
+    if args.max_replica_lag_wait_seconds == DEFAULT_REPLICA_LAG_WAIT_SECONDS
+        && let Some(v) = file.max_replica_lag_wait_seconds
+    {
+        args.max_replica_lag_wait_seconds = v;
+    }
+    if args.also_tables.is_none() {
+        args.also_tables = file.also_tables;
     }
 
     if args.sslmode == SslMode::Disable
@@ -686,6 +731,22 @@ async fn main() -> Result<()> {
         args.gentle,
     );
     throttle.validate().map_err(|e| anyhow::anyhow!(e))?;
+
+    // Validate replication-lag gating
+    if let Some(threshold) = args.max_replica_lag_seconds
+        && threshold < 0.0
+    {
+        return Err(anyhow::anyhow!(
+            "--max-replica-lag-seconds ({threshold}) must be >= 0"
+        ));
+    }
+
+    // Parse the explicit table list up front so a typo fails before we connect.
+    let also_tables = match args.also_tables {
+        Some(ref entries) => pg_maintainer::types::ExplicitTable::parse_list(entries)
+            .map_err(|e| anyhow::anyhow!(e))?,
+        None => Vec::new(),
+    };
 
     // Validate wraparound_pct range
     if let Some(pct) = args.wraparound_pct
@@ -994,6 +1055,28 @@ async fn main() -> Result<()> {
         args.wraparound_min_age
     };
 
+    // Replication-lag gating. Observing once up front tells the operator the
+    // cluster state before any work starts, and disables the gate immediately when
+    // there is nothing to watch.
+    let lag_gate = match args.max_replica_lag_seconds {
+        Some(threshold) => {
+            let gate = Arc::new(pg_maintainer::types::ReplicaLagGate::new(
+                threshold,
+                args.max_replica_lag_wait_seconds,
+            ));
+            operations::log_initial_replica_lag(&client, &gate, &logger)
+                .await
+                .context("Failed to read replication lag")?;
+            Some(gate)
+        }
+        None => None,
+    };
+
+    // Resolve the explicit table list against the schemas and the catalog.
+    let also_tables = operations::resolve_explicit_tables(&client, &also_tables, &schemas, &logger)
+        .await
+        .context("Failed to resolve --also-tables entries")?;
+
     let start = std::time::Instant::now();
 
     let run_policy = pg_maintainer::types::RunPolicy {
@@ -1037,6 +1120,7 @@ async fn main() -> Result<()> {
             &logger,
             &mut shutdown_rx,
             vacuum_opts,
+            lag_gate.as_deref(),
         )
         .await
         .context("VACUUM phase failed")?
@@ -1073,6 +1157,7 @@ async fn main() -> Result<()> {
             args.skip_active_vacuum,
             &logger,
             &mut shutdown_rx,
+            lag_gate.as_deref(),
         )
         .await
         .context("ANALYZE phase failed")?
@@ -1108,6 +1193,7 @@ async fn main() -> Result<()> {
             &logger,
             &mut shutdown_rx,
             vacuum_opts,
+            lag_gate.as_deref(),
         )
         .await
         .context("VACUUM FREEZE phase failed")?
@@ -1149,6 +1235,7 @@ async fn main() -> Result<()> {
             &logger,
             &mut shutdown_rx,
             vacuum_opts,
+            lag_gate.as_deref(),
         )
         .await
         .context("VACUUM BLOAT phase failed")?;
@@ -1231,6 +1318,7 @@ async fn main() -> Result<()> {
             &already_handled,
             &logger,
             &mut shutdown_rx,
+            lag_gate.as_deref(),
         )
         .await
         .context("ANALYZE STALE STATS phase failed")?;
@@ -1246,23 +1334,50 @@ async fn main() -> Result<()> {
         Default::default()
     };
 
+    // ── Phase 6: VACUUM (ANALYZE) explicitly listed tables ───────────────────
+    // Runs after whichever modes were selected, in addition to them — it is not a
+    // --mode value.
+    let also_tables_summary = if !also_tables.is_empty() {
+        logger.log(
+            LogLevel::Info,
+            "═══ Phase 6: VACUUM (ANALYZE) (--also-tables) ═══",
+        );
+        operations::run_also_tables(
+            &client,
+            &also_tables,
+            run_policy,
+            &already_handled,
+            &logger,
+            &mut shutdown_rx,
+            vacuum_opts,
+            lag_gate.as_deref(),
+        )
+        .await
+        .context("VACUUM ANALYZE (--also-tables) phase failed")?
+    } else {
+        Default::default()
+    };
+
     // ── Final summary ─────────────────────────────────────────────────────────
     let elapsed = start.elapsed();
     let total_tables = vacuum_summary.total
         + analyze_summary.total
         + freeze_summary.total
         + bloat_summary.total
-        + stale_stats_summary.total;
+        + stale_stats_summary.total
+        + also_tables_summary.total;
     let total_ok = vacuum_summary.succeeded
         + analyze_summary.succeeded
         + freeze_summary.succeeded
         + bloat_summary.succeeded
-        + stale_stats_summary.succeeded;
+        + stale_stats_summary.succeeded
+        + also_tables_summary.succeeded;
     let total_fail = vacuum_summary.failed
         + analyze_summary.failed
         + freeze_summary.failed
         + bloat_summary.failed
-        + stale_stats_summary.failed;
+        + stale_stats_summary.failed
+        + also_tables_summary.failed;
 
     logger.log_always(
         LogLevel::Success,
@@ -1329,6 +1444,31 @@ async fn main() -> Result<()> {
                 stale_stats_summary.succeeded,
                 stale_stats_summary.failed,
                 stale_stats_summary.skipped
+            ),
+        );
+    }
+
+    if !also_tables.is_empty() {
+        logger.log_always(
+            LogLevel::Info,
+            &format!(
+                "  VACUUM ANALYZE (also-tables) — total: {}, ok: {}, failed: {}, skipped: {}",
+                also_tables_summary.total,
+                also_tables_summary.succeeded,
+                also_tables_summary.failed,
+                also_tables_summary.skipped
+            ),
+        );
+    }
+    if let Some(ref gate) = lag_gate
+        && !gate.is_disabled()
+    {
+        logger.log_always(
+            LogLevel::Info,
+            &format!(
+                "  Replication lag — waited {:.0}s total, {} table(s) skipped",
+                gate.total_waited().as_secs_f64(),
+                gate.tables_skipped()
             ),
         );
     }

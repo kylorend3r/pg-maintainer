@@ -78,3 +78,15 @@ sslmode = "disable"   # disable | require | verify-ca | verify-full
 log-file     = "maintainer.log"
 log-format   = "text"    # text | json
 silence-mode = false     # suppress terminal output; logs still written to file
+
+# ── Replica-lag gating ────────────────────────────────────────────────────────
+# Before each table, wait while any standby's replay lag exceeds this many seconds.
+# Omit to disable gating entirely (nothing is queried). Requires the role to have
+# pg_read_all_stats, which pg_monitor grants.
+# max-replica-lag-seconds      = 30
+# max-replica-lag-wait-seconds = 300   # per-table wait budget; 0 = skip immediately
+
+# ── Explicit table list ───────────────────────────────────────────────────────
+# VACUUM (ANALYZE) these tables after the selected modes finish, in addition to
+# them, with no discovery thresholds applied. Names must be schema-qualified.
+# also-tables = ["public.orders", "public.customers"]

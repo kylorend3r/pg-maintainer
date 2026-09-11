@@ -9,8 +9,8 @@ use pg_maintainer::credentials::get_password_from_pgpass;
 use pg_maintainer::dsn::{self, ParsedDsn};
 use pg_maintainer::queries;
 use pg_maintainer::types::{
-    BloatTableInfo, FreezeTableInfo, LogFormat, Mode, OperationSummary, SslMode, TableInfo,
-    ThrottleSettings,
+    BloatTableInfo, ExplicitTable, FreezeTableInfo, LagObservation, LogFormat, Mode,
+    OperationSummary, ReplicaLagGate, SslMode, StandbyLag, TableInfo, ThrottleSettings,
 };
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -986,4 +986,188 @@ fn test_redact_percent_encoded_password_leaves_nothing_behind() {
 #[test]
 fn test_redact_unparseable_falls_back_to_full_redaction() {
     assert_eq!(dsn::redact("host=h password='unclosed"), "[REDACTED]");
+}
+
+// ── ExplicitTable (--also-tables parsing) ─────────────────────────────────────
+
+fn entries(v: &[&str]) -> Vec<String> {
+    v.iter().map(|s| s.to_string()).collect()
+}
+
+#[test]
+fn test_explicit_table_parses_qualified_name() {
+    let out = ExplicitTable::parse_list(&entries(&["public.orders"])).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].schema_name, "public");
+    assert_eq!(out[0].table_name, "orders");
+}
+
+#[test]
+fn test_explicit_table_bare_name_rejected_and_named() {
+    let err = ExplicitTable::parse_list(&entries(&["orders"])).unwrap_err();
+    assert!(err.contains("orders"), "{err}");
+    assert!(err.contains("schema-qualified"), "{err}");
+}
+
+#[test]
+fn test_explicit_table_empty_halves_rejected() {
+    assert!(ExplicitTable::parse_list(&entries(&[".orders"])).is_err());
+    assert!(ExplicitTable::parse_list(&entries(&["public."])).is_err());
+}
+
+#[test]
+fn test_explicit_table_too_many_dots_rejected() {
+    let err = ExplicitTable::parse_list(&entries(&["a.b.c"])).unwrap_err();
+    assert!(err.contains("more than one"), "{err}");
+}
+
+#[test]
+fn test_explicit_table_preserves_order_and_dedupes() {
+    let out = ExplicitTable::parse_list(&entries(&["public.b", "public.a", "public.b", "other.a"]))
+        .unwrap();
+    let got: Vec<String> = out
+        .iter()
+        .map(|t| format!("{}.{}", t.schema_name, t.table_name))
+        .collect();
+    assert_eq!(got, vec!["public.b", "public.a", "other.a"]);
+}
+
+#[test]
+fn test_explicit_table_trims_and_skips_blanks() {
+    let out = ExplicitTable::parse_list(&entries(&["  public.orders  ", "", "   "])).unwrap();
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0].table_name, "orders");
+}
+
+#[test]
+fn test_explicit_table_empty_list_is_ok() {
+    assert!(ExplicitTable::parse_list(&[]).unwrap().is_empty());
+}
+
+// ── LagObservation ────────────────────────────────────────────────────────────
+
+fn standby(name: &str, lag: Option<f64>) -> StandbyLag {
+    StandbyLag {
+        application_name: name.to_string(),
+        state: "streaming".to_string(),
+        sync_state: "async".to_string(),
+        replay_lag_seconds: lag,
+    }
+}
+
+#[test]
+fn test_lag_no_replicas_is_zero_not_unknown() {
+    let obs = LagObservation::NoReplicas;
+    assert_eq!(obs.max_lag_seconds(), Some(0.0));
+    assert!(!obs.exceeds(0.0));
+}
+
+#[test]
+fn test_lag_unobservable_is_unknown_and_never_gates() {
+    let obs = LagObservation::Unobservable;
+    assert_eq!(obs.max_lag_seconds(), None);
+    // Must not block maintenance just because the role cannot read the view.
+    assert!(!obs.exceeds(0.0));
+    assert!(!obs.exceeds(1000.0));
+}
+
+#[test]
+fn test_lag_null_replay_counts_as_caught_up() {
+    let obs = LagObservation::Observed(vec![standby("r1", None)]);
+    assert_eq!(obs.max_lag_seconds(), Some(0.0));
+    assert!(!obs.exceeds(1.0));
+}
+
+#[test]
+fn test_lag_takes_worst_standby() {
+    let obs = LagObservation::Observed(vec![
+        standby("r1", Some(2.0)),
+        standby("r2", Some(45.5)),
+        standby("r3", None),
+    ]);
+    assert_eq!(obs.max_lag_seconds(), Some(45.5));
+    assert_eq!(obs.worst_standby().unwrap().application_name, "r2");
+    assert_eq!(obs.standby_count(), 3);
+}
+
+#[test]
+fn test_lag_exceeds_threshold_boundaries() {
+    let obs = LagObservation::Observed(vec![standby("r1", Some(30.0))]);
+    assert!(!obs.exceeds(30.0), "exactly at the threshold must not gate");
+    assert!(!obs.exceeds(30.1));
+    assert!(obs.exceeds(29.9));
+}
+
+#[test]
+fn test_lag_mixed_nulls_and_values() {
+    let obs = LagObservation::Observed(vec![standby("r1", None), standby("r2", Some(0.25))]);
+    assert_eq!(obs.max_lag_seconds(), Some(0.25));
+    assert!(!obs.exceeds(1.0));
+    assert!(obs.exceeds(0.1));
+}
+
+// ── ReplicaLagGate ────────────────────────────────────────────────────────────
+
+#[test]
+fn test_gate_starts_enabled_and_disables_once() {
+    let gate = ReplicaLagGate::new(30.0, 300);
+    assert!(!gate.is_disabled());
+    gate.disable();
+    assert!(gate.is_disabled());
+}
+
+#[test]
+fn test_gate_accumulates_waits_and_skips() {
+    let gate = ReplicaLagGate::new(30.0, 300);
+    assert_eq!(gate.total_waited().as_millis(), 0);
+    assert_eq!(gate.tables_skipped(), 0);
+
+    gate.add_waited(std::time::Duration::from_millis(1500));
+    gate.add_waited(std::time::Duration::from_millis(500));
+    gate.record_skip();
+    gate.record_skip();
+
+    assert_eq!(gate.total_waited().as_millis(), 2000);
+    assert_eq!(gate.tables_skipped(), 2);
+}
+
+#[test]
+fn test_gate_zero_wait_is_a_valid_skip_immediately_setting() {
+    let gate = ReplicaLagGate::new(10.0, 0);
+    assert_eq!(gate.max_wait_seconds, 0);
+    assert_eq!(gate.threshold_seconds, 10.0);
+}
+
+// ── Replication SQL constants ─────────────────────────────────────────────────
+
+#[test]
+fn test_replication_lag_query_reads_replay_lag() {
+    assert!(
+        queries::GET_REPLICATION_LAG.contains("pg_stat_replication"),
+        "GET_REPLICATION_LAG must read pg_stat_replication"
+    );
+    assert!(
+        queries::GET_REPLICATION_LAG.contains("replay_lag"),
+        "GET_REPLICATION_LAG must select replay_lag"
+    );
+}
+
+#[test]
+fn test_privilege_probe_checks_pg_read_all_stats() {
+    assert!(
+        queries::GET_CAN_READ_REPLICATION_STATS.contains("pg_read_all_stats"),
+        "the probe must test pg_read_all_stats membership"
+    );
+}
+
+#[test]
+fn test_explicit_tables_query_pairs_arrays_and_allows_matviews() {
+    assert!(
+        queries::FIND_EXPLICIT_TABLES.contains("unnest($1::text[], $2::text[])"),
+        "FIND_EXPLICIT_TABLES must pair the two request arrays"
+    );
+    assert!(
+        queries::FIND_EXPLICIT_TABLES.contains("'r', 'm', 'p'"),
+        "FIND_EXPLICIT_TABLES must accept tables, matviews and partitioned parents"
+    );
 }

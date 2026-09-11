@@ -270,3 +270,191 @@ impl StaleStatsTableInfo {
         analyze_threshold + (analyze_scale_factor * self.n_live_tup as f64).round() as i64
     }
 }
+
+/// A table named explicitly on `--also-tables`, always schema-qualified.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExplicitTable {
+    pub schema_name: String,
+    pub table_name: String,
+}
+
+impl ExplicitTable {
+    /// Parse `schema.table` entries, preserving the order given and collapsing
+    /// duplicates.
+    ///
+    /// Qualification is mandatory: a bare table name is rejected rather than
+    /// resolved against every schema, so an explicit list can never touch a
+    /// same-named table in a schema the operator forgot about. Identifiers
+    /// containing a literal `.` are not supported here.
+    pub fn parse_list(entries: &[String]) -> Result<Vec<ExplicitTable>, String> {
+        let mut out: Vec<ExplicitTable> = Vec::new();
+        for raw in entries {
+            let entry = raw.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let Some((schema, table)) = entry.split_once('.') else {
+                return Err(format!(
+                    "--also-tables entry '{entry}' must be schema-qualified, e.g. public.{entry}"
+                ));
+            };
+            if schema.is_empty() || table.is_empty() {
+                return Err(format!(
+                    "--also-tables entry '{entry}' is not a valid schema.table name"
+                ));
+            }
+            if table.contains('.') {
+                return Err(format!(
+                    "--also-tables entry '{entry}' has more than one '.' — expected schema.table"
+                ));
+            }
+            let candidate = ExplicitTable {
+                schema_name: schema.to_string(),
+                table_name: table.to_string(),
+            };
+            if !out.contains(&candidate) {
+                out.push(candidate);
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// One row of `pg_stat_replication`, reduced to what the lag gate needs.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StandbyLag {
+    pub application_name: String,
+    pub state: String,
+    pub sync_state: String,
+    /// `None` means the standby is caught up and there is no recent WAL to
+    /// measure against — not that the lag is unknown.
+    pub replay_lag_seconds: Option<f64>,
+}
+
+/// What a read of `pg_stat_replication` told us.
+///
+/// `NoReplicas` and `Unobservable` both come back as an empty view and must not
+/// be conflated: the first is a healthy single-primary instance, the second is a
+/// role without `pg_read_all_stats` that simply cannot see the rows.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LagObservation {
+    NoReplicas,
+    Unobservable,
+    Observed(Vec<StandbyLag>),
+}
+
+impl LagObservation {
+    /// Worst replay lag across every standby, treating a caught-up `NULL` as zero.
+    /// `None` only when lag could not be observed at all.
+    pub fn max_lag_seconds(&self) -> Option<f64> {
+        match self {
+            LagObservation::NoReplicas => Some(0.0),
+            LagObservation::Unobservable => None,
+            LagObservation::Observed(standbys) => Some(
+                standbys
+                    .iter()
+                    .map(|s| s.replay_lag_seconds.unwrap_or(0.0))
+                    .fold(0.0_f64, f64::max),
+            ),
+        }
+    }
+
+    /// True only when lag is both observable and over the threshold.
+    pub fn exceeds(&self, threshold_seconds: f64) -> bool {
+        match self.max_lag_seconds() {
+            Some(max) => max > threshold_seconds,
+            None => false,
+        }
+    }
+
+    /// The standby responsible for `max_lag_seconds`, for logging.
+    pub fn worst_standby(&self) -> Option<&StandbyLag> {
+        match self {
+            LagObservation::Observed(standbys) => standbys.iter().max_by(|a, b| {
+                a.replay_lag_seconds
+                    .unwrap_or(0.0)
+                    .total_cmp(&b.replay_lag_seconds.unwrap_or(0.0))
+            }),
+            _ => None,
+        }
+    }
+
+    /// Number of standbys seen.
+    pub fn standby_count(&self) -> usize {
+        match self {
+            LagObservation::Observed(standbys) => standbys.len(),
+            _ => 0,
+        }
+    }
+}
+
+/// Verdict from the per-table replication-lag gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LagGateVerdict {
+    Proceed,
+    SkipTable,
+    ShutdownRequested,
+}
+
+/// Per-table replication-lag gate: thresholds plus the run-scoped state it
+/// accumulates.
+///
+/// State lives behind atomics so the gate can be shared by `&` across every
+/// runner, the same way `Arc<Logger>` already is, instead of threading `&mut`
+/// through six call sites.
+#[derive(Debug)]
+pub struct ReplicaLagGate {
+    pub threshold_seconds: f64,
+    pub max_wait_seconds: u64,
+    pub poll_interval_seconds: u64,
+    disabled: std::sync::atomic::AtomicBool,
+    total_waited_ms: std::sync::atomic::AtomicU64,
+    tables_skipped: std::sync::atomic::AtomicUsize,
+}
+
+impl ReplicaLagGate {
+    pub fn new(threshold_seconds: f64, max_wait_seconds: u64) -> Self {
+        Self {
+            threshold_seconds,
+            max_wait_seconds,
+            poll_interval_seconds: crate::config::REPLICA_LAG_POLL_INTERVAL_SECONDS,
+            disabled: std::sync::atomic::AtomicBool::new(false),
+            total_waited_ms: std::sync::atomic::AtomicU64::new(0),
+            tables_skipped: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Turned off for the rest of the run once we learn there is nothing to watch.
+    pub fn is_disabled(&self) -> bool {
+        self.disabled.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn disable(&self) {
+        self.disabled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn add_waited(&self, elapsed: std::time::Duration) {
+        self.total_waited_ms.fetch_add(
+            elapsed.as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn record_skip(&self) {
+        self.tables_skipped
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn total_waited(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.total_waited_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    pub fn tables_skipped(&self) -> usize {
+        self.tables_skipped
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}

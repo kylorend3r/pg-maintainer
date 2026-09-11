@@ -1413,3 +1413,224 @@ dsn = "${{MY_TEST_DSN}}"
         .assert()
         .code(predicate::ne(2));
 }
+
+// ── Replication-lag gating (--max-replica-lag-seconds) ────────────────────────
+
+#[test]
+fn test_max_replica_lag_seconds_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--max-replica-lag-seconds")
+        .arg("30")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_max_replica_lag_seconds_fractional_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--max-replica-lag-seconds")
+        .arg("0.5")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_max_replica_lag_seconds_zero_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--max-replica-lag-seconds")
+        .arg("0")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_max_replica_lag_seconds_not_a_number_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--max-replica-lag-seconds")
+        .arg("soon")
+        .env_clear()
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn test_max_replica_lag_wait_seconds_zero_accepted() {
+    // 0 is a real setting: never maintain while lagging, never sleep.
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--max-replica-lag-seconds")
+        .arg("30")
+        .arg("--max-replica-lag-wait-seconds")
+        .arg("0")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_replica_lag_flags_absent_by_default() {
+    // No gating flags means no replication behavior at all.
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .env_clear()
+        .assert()
+        .stderr(predicate::str::contains("replica").not());
+}
+
+#[test]
+fn test_help_contains_replica_lag_flags() {
+    cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--max-replica-lag-seconds"))
+        .stdout(predicate::str::contains("--max-replica-lag-wait-seconds"));
+}
+
+// ── Explicit table list (--also-tables) ───────────────────────────────────────
+
+#[test]
+fn test_also_tables_qualified_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--also-tables")
+        .arg("public.orders,public.customers")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_also_tables_bare_name_rejected_by_name() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--also-tables")
+        .arg("orders")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("orders"))
+        .stderr(predicate::str::contains("schema-qualified"));
+}
+
+#[test]
+fn test_also_tables_mixed_list_rejects_the_bare_entry() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--also-tables")
+        .arg("public.orders,customers")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("customers"));
+}
+
+#[test]
+fn test_also_tables_too_many_dots_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--also-tables")
+        .arg("a.b.c")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("more than one"));
+}
+
+#[test]
+fn test_also_tables_validated_before_connecting() {
+    // A typo must fail immediately, not after a connection attempt.
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--also-tables")
+        .arg("orders")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Failed to connect").not());
+}
+
+#[test]
+fn test_also_tables_composes_with_mode() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("bloated")
+        .arg("--also-tables")
+        .arg("public.orders")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_help_contains_also_tables() {
+    cmd()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--also-tables"));
+}
+
+#[test]
+fn test_config_file_with_new_feature_keys() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+max-replica-lag-seconds = 30.0
+max-replica-lag-wait-seconds = 120
+also-tables = ["public.orders", "public.customers"]
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_config_file_rejects_unqualified_also_table() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+also-tables = ["orders"]
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("schema-qualified"));
+}

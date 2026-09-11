@@ -41,3 +41,7 @@ pub const MIN_SUPPORTED_PG_VERSION_LABEL: &str = "PostgreSQL 14";
 // The tool's own logging schema — always excluded from maintenance so pg-maintainer
 // never vacuums/analyzes its own logbook table.
 pub const LOGBOOK_SCHEMA_NAME: &str = "maintainer_logbook";
+
+// Replica-lag gating. The gate is off unless --max-replica-lag-seconds is given.
+pub const DEFAULT_REPLICA_LAG_WAIT_SECONDS: u64 = 300;
+pub const REPLICA_LAG_POLL_INTERVAL_SECONDS: u64 = 5;

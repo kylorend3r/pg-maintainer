@@ -2,6 +2,8 @@
 
 A single-threaded PostgreSQL table maintenance tool written in Rust. It runs five sequential maintenance phases against one or more schemas, targeting only the tables that actually need work. **Requires PostgreSQL 14+.**
 
+![pg-maintainer dry-run demo](docs/pg-maintainer-demo.gif)
+
 ## Why pg-maintainer?
 
 - **No extensions required** — vacuum/analyze/freeze use only standard `pg_catalog` views; bloat detection is statistics-based (`pg_stat_user_tables`), not `pgstattuple` or `pg_repack`. Works on any standard PostgreSQL installation, including managed services where you can't install extensions.
@@ -138,6 +140,12 @@ pg-maintainer -d mydb -s public --gentle
 # Same, with a hand-picked cost pair
 pg-maintainer -d mydb -s public --vacuum-cost-delay-ms 20 --vacuum-cost-limit 400
 
+# Also maintain specific tables, whatever the thresholds say
+pg-maintainer -d mydb -s public --also-tables public.orders,public.customers
+
+# Yield to a lagging replica: wait before each table while replay lag exceeds 30s
+pg-maintainer -d mydb -s public --max-replica-lag-seconds 30
+
 # Pass the whole connection as one string
 pg-maintainer -s public --dsn "postgres://maintainer@db.internal:5432/mydb"
 
@@ -227,6 +235,12 @@ Options:
           Session vacuum_cost_limit (1-10000). Cost budget between delays.
       --gentle
           Throttle preset: vacuum_cost_delay 10ms, vacuum_cost_limit 200
+      --max-replica-lag-seconds <SECONDS>
+          Wait before each table while replica replay lag exceeds this (default: no gating)
+      --max-replica-lag-wait-seconds <SECONDS>
+          Max wait per table for replica lag to recover; 0 = skip immediately [default: 300]
+      --also-tables <SCHEMA.TABLE,...>
+          Also VACUUM (ANALYZE) these schema-qualified tables after the selected modes
       --sslmode <SSLMODE>
           [default: disable]
       --ssl-ca-cert <SSL_CA_CERT>
@@ -267,6 +281,8 @@ Options:
 - **Automatic session tuning**: `vacuum_buffer_usage_limit` is set to 1/16 of `shared_buffers` (PostgreSQL 16+) and `max_parallel_maintenance_workers` is raised to match the server's `max_parallel_workers`, so VACUUM's index-cleanup phase can use the full parallel worker pool instead of the low built-in default. Both are session-scoped `SET`s, no server config changes required. Neither affects Phase 3 (freeze), which runs with `INDEX_CLEANUP FALSE`.
 - **Connection strings**: pass a single `postgres://` URI or libpq keyword string via `--dsn` / `PG_DSN`, instead of five separate flags. TLS parameters (`sslmode`, `sslrootcert`, `sslcert`, `sslkey`) are honored.
 - **I/O throttling**: `--gentle` (or explicit `--vacuum-cost-delay-ms`/`--vacuum-cost-limit`) makes maintenance yield to production traffic instead of running as fast as the storage allows. Opt-in; the speed tuning above stays the default.
+- **Replica-lag awareness**: `--max-replica-lag-seconds` waits before each table while a standby's replay lag exceeds the threshold. Off unless set.
+- **Explicit table list**: `--also-tables` runs `VACUUM (ANALYZE)` on named tables after the selected modes, in addition to them.
 - **Wraparound tuning**: flag candidates by absolute XID age (`--wraparound-min-age`) or by percentage of `autovacuum_freeze_max_age` (`--wraparound-pct`)
 - **SSL/TLS**: `disable`/`require`/`verify-ca`/`verify-full`, with custom CA and mutual TLS support
 - **Multiple credential sources**: `PG_PASSWORD`, `PG_PASSWORD_FILE` (Docker/Kubernetes secrets), `.pgpass`/`$PGPASSFILE`, or CLI flag
