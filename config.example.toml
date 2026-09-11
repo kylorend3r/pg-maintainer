@@ -2,6 +2,12 @@
 # CLI arguments take precedence over values defined here.
 
 # ── Connection ────────────────────────────────────────────────────────────────
+# A full connection string can replace the individual fields below. Accepts a
+# postgres:// URI or a libpq keyword string. Any field you also set explicitly
+# (here or on the command line) overrides the matching DSN component.
+# dsn = "postgres://maintainer@db.internal:5432/mydb?sslmode=verify-full&sslrootcert=/etc/ssl/ca.pem"
+# dsn = "${PG_DSN}"               # env-var interpolation, as with password
+
 host     = "localhost"
 port     = 5432
 database = "postgres"

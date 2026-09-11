@@ -1,6 +1,7 @@
 pub mod config;
 pub mod connection;
 pub mod credentials;
+pub mod dsn;
 pub mod logging;
 pub mod operations;
 pub mod queries;
