@@ -7,7 +7,7 @@ use pg_maintainer::config::{
 use pg_maintainer::connection::{self, ConnectionConfig};
 use pg_maintainer::logging::{LogLevel, Logger};
 use pg_maintainer::operations;
-use pg_maintainer::types::{LogFormat, Mode, SslMode};
+use pg_maintainer::types::{LogFormat, Mode, OrderBy, SslMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
@@ -101,6 +101,15 @@ struct Args {
     /// Cap each mode to its top N candidate tables (default: no limit).
     #[arg(long, help = "Limit each mode to top N tables (default: unlimited)")]
     limit: Option<i64>,
+
+    /// Candidate priority order within each phase's already-qualified rows.
+    /// Omit to keep each phase's own severity-based ordering (default).
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(OrderBy),
+        help = "Candidate order within each phase: size, last-maintained (default: severity-based)"
+    )]
+    order_by: Option<OrderBy>,
 
     // ── Overdue maintenance (opt-in) ──────────────────────────────────────────
     /// VACUUM tables not vacuumed (manual or auto) in this many days. Opt-in: requires --mode includes vacuum-overdue.
@@ -326,6 +335,7 @@ struct Config {
     force: Option<bool>,
     skip_active_vacuum: Option<bool>,
     limit: Option<i64>,
+    order_by: Option<String>,
     vacuum_older_than_days: Option<i64>,
     analyze_older_than_days: Option<i64>,
     bloat_threshold_pct: Option<f64>,
@@ -424,6 +434,12 @@ fn merge_config(file: Config, mut args: Args) -> Args {
     }
     if args.limit.is_none() {
         args.limit = file.limit;
+    }
+    if args.order_by.is_none()
+        && let Some(ref ob) = file.order_by
+        && let Ok(v) = ob.parse::<OrderBy>()
+    {
+        args.order_by = Some(v);
     }
     if args.vacuum_older_than_days.is_none() {
         args.vacuum_older_than_days = file.vacuum_older_than_days;
@@ -1179,6 +1195,7 @@ async fn main() -> Result<()> {
             min_bytes,
             max_bytes,
             limit_n,
+            args.order_by,
         )
         .await
         .context("Failed to query never-vacuumed tables")?;
@@ -1216,6 +1233,7 @@ async fn main() -> Result<()> {
             min_bytes,
             max_bytes,
             limit_n,
+            args.order_by,
         )
         .await
         .context("Failed to query never-analyzed tables")?;
@@ -1254,6 +1272,7 @@ async fn main() -> Result<()> {
             min_bytes,
             max_bytes,
             limit_n,
+            args.order_by,
         )
         .await
         .context("Failed to query wraparound candidates")?;
@@ -1299,6 +1318,7 @@ async fn main() -> Result<()> {
             min_bytes,
             max_bytes,
             limit_n,
+            args.order_by,
         )
         .await
         .context("Failed to query bloat candidates")?;
@@ -1380,6 +1400,7 @@ async fn main() -> Result<()> {
             min_bytes,
             max_bytes,
             limit_n,
+            args.order_by,
         )
         .await
         .context("Failed to query stale-stats candidates")?;

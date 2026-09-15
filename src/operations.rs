@@ -2,7 +2,7 @@ use crate::logging::{LogContext, LogLevel, Logger};
 use crate::queries;
 use crate::types::{
     BloatTableInfo, ExplicitTable, FreezeTableInfo, LagGateVerdict, LagObservation,
-    OperationSummary, ReplicaLagGate, RunPolicy, StandbyLag, TableInfo, VacuumOptions,
+    OperationSummary, OrderBy, ReplicaLagGate, RunPolicy, StandbyLag, TableInfo, VacuumOptions,
 };
 use crate::vacuum_output;
 use anyhow::Result;
@@ -109,6 +109,7 @@ pub async fn find_never_vacuumed(
     min_bytes: i64,
     max_bytes: i64,
     limit: i64,
+    order_by: Option<OrderBy>,
 ) -> Result<Vec<TableInfo>> {
     // Vec<String> implements ToSql for array binding; &[String] does not.
     let schemas_vec: Vec<String> = schemas.to_vec();
@@ -121,11 +122,13 @@ pub async fn find_never_vacuumed(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query never-vacuumed tables: {e}"))?
     } else {
+        let query = match order_by {
+            None => queries::FIND_NEVER_VACUUMED,
+            Some(OrderBy::Size) => queries::FIND_NEVER_VACUUMED_BY_SIZE,
+            Some(OrderBy::LastMaintained) => queries::FIND_NEVER_VACUUMED_BY_LAST_MAINTAINED,
+        };
         client
-            .query(
-                queries::FIND_NEVER_VACUUMED,
-                &[&schemas_vec, &min_bytes, &max_bytes, &limit],
-            )
+            .query(query, &[&schemas_vec, &min_bytes, &max_bytes, &limit])
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query never-vacuumed tables: {e}"))?
     };
@@ -137,6 +140,8 @@ pub async fn find_never_vacuumed(
             table_name: row.get("tablename"),
             n_live_tup: row.get("n_live_tup"),
             n_dead_tup: row.get("n_dead_tup"),
+            size_bytes: row.get("size_bytes"),
+            last_maintained: row.get("last_maintained"),
         })
         .collect())
 }
@@ -150,6 +155,7 @@ pub async fn find_never_analyzed(
     min_bytes: i64,
     max_bytes: i64,
     limit: i64,
+    order_by: Option<OrderBy>,
 ) -> Result<Vec<TableInfo>> {
     let schemas_vec: Vec<String> = schemas.to_vec();
     let rows = if let Some(tbl) = table {
@@ -161,11 +167,13 @@ pub async fn find_never_analyzed(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query never-analyzed tables: {e}"))?
     } else {
+        let query = match order_by {
+            None => queries::FIND_NEVER_ANALYZED,
+            Some(OrderBy::Size) => queries::FIND_NEVER_ANALYZED_BY_SIZE,
+            Some(OrderBy::LastMaintained) => queries::FIND_NEVER_ANALYZED_BY_LAST_MAINTAINED,
+        };
         client
-            .query(
-                queries::FIND_NEVER_ANALYZED,
-                &[&schemas_vec, &min_bytes, &max_bytes, &limit],
-            )
+            .query(query, &[&schemas_vec, &min_bytes, &max_bytes, &limit])
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query never-analyzed tables: {e}"))?
     };
@@ -177,12 +185,15 @@ pub async fn find_never_analyzed(
             table_name: row.get("tablename"),
             n_live_tup: row.get("n_live_tup"),
             n_dead_tup: row.get("n_dead_tup"),
+            size_bytes: row.get("size_bytes"),
+            last_maintained: row.get("last_maintained"),
         })
         .collect())
 }
 
 /// Returns tables whose XID age exceeds `min_age`, ordered worst-first.
 /// If `table` is Some, only that table is checked.
+#[allow(clippy::too_many_arguments)]
 pub async fn find_wraparound_candidates(
     client: &Client,
     schemas: &[String],
@@ -191,6 +202,7 @@ pub async fn find_wraparound_candidates(
     min_bytes: i64,
     max_bytes: i64,
     limit: i64,
+    order_by: Option<OrderBy>,
 ) -> Result<Vec<FreezeTableInfo>> {
     let schemas_vec: Vec<String> = schemas.to_vec();
     let rows = if let Some(tbl) = table {
@@ -202,9 +214,14 @@ pub async fn find_wraparound_candidates(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query wraparound candidates: {e}"))?
     } else {
+        let query = match order_by {
+            None => queries::FIND_WRAPAROUND_CANDIDATES,
+            Some(OrderBy::Size) => queries::FIND_WRAPAROUND_CANDIDATES_BY_SIZE,
+            Some(OrderBy::LastMaintained) => queries::FIND_WRAPAROUND_CANDIDATES_BY_LAST_MAINTAINED,
+        };
         client
             .query(
-                queries::FIND_WRAPAROUND_CANDIDATES,
+                query,
                 &[&schemas_vec, &min_age, &min_bytes, &max_bytes, &limit],
             )
             .await
@@ -218,6 +235,8 @@ pub async fn find_wraparound_candidates(
             table_name: row.get("table_name"),
             xid_age: row.get("xid_age"),
             freeze_max_age: row.get("freeze_max_age"),
+            size_bytes: row.get("size_bytes"),
+            last_maintained: row.get("last_maintained"),
         })
         .collect())
 }
@@ -234,6 +253,7 @@ pub async fn find_bloat_candidates(
     min_bytes: i64,
     max_bytes: i64,
     limit: i64,
+    order_by: Option<OrderBy>,
 ) -> Result<Vec<BloatTableInfo>> {
     let schemas_vec: Vec<String> = schemas.to_vec();
     let rows = if let Some(tbl) = table {
@@ -252,9 +272,14 @@ pub async fn find_bloat_candidates(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query bloat candidates: {e}"))?
     } else {
+        let query = match order_by {
+            None => queries::FIND_BLOAT_CANDIDATES,
+            Some(OrderBy::Size) => queries::FIND_BLOAT_CANDIDATES_BY_SIZE,
+            Some(OrderBy::LastMaintained) => queries::FIND_BLOAT_CANDIDATES_BY_LAST_MAINTAINED,
+        };
         client
             .query(
-                queries::FIND_BLOAT_CANDIDATES,
+                query,
                 &[
                     &schemas_vec,
                     &bloat_threshold_pct,
@@ -275,6 +300,8 @@ pub async fn find_bloat_candidates(
             table_name: row.get("tablename"),
             n_live_tup: row.get("n_live_tup"),
             n_dead_tup: row.get("n_dead_tup"),
+            size_bytes: row.get("size_bytes"),
+            last_maintained: row.get("last_maintained"),
         })
         .collect())
 }
@@ -316,6 +343,7 @@ pub async fn find_stale_stats_candidates(
     min_bytes: i64,
     max_bytes: i64,
     limit: i64,
+    order_by: Option<OrderBy>,
 ) -> Result<Vec<crate::types::StaleStatsTableInfo>> {
     let schemas_vec: Vec<String> = schemas.to_vec();
     let rows = if let Some(tbl) = table {
@@ -334,9 +362,14 @@ pub async fn find_stale_stats_candidates(
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query stale-stats candidates: {e}"))?
     } else {
+        let query = match order_by {
+            None => queries::FIND_STALE_STATS,
+            Some(OrderBy::Size) => queries::FIND_STALE_STATS_BY_SIZE,
+            Some(OrderBy::LastMaintained) => queries::FIND_STALE_STATS_BY_LAST_MAINTAINED,
+        };
         client
             .query(
-                queries::FIND_STALE_STATS,
+                query,
                 &[
                     &schemas_vec,
                     &analyze_threshold,
@@ -357,6 +390,8 @@ pub async fn find_stale_stats_candidates(
             table_name: row.get("tablename"),
             n_live_tup: row.get("n_live_tup"),
             n_mod_since_analyze: row.get("n_mod_since_analyze"),
+            size_bytes: row.get("size_bytes"),
+            last_maintained: row.get("last_maintained"),
         })
         .collect())
 }
@@ -1086,6 +1121,22 @@ pub async fn run_analyze_never_analyzed(
     Ok(summary)
 }
 
+/// Format a byte count as a human-readable kB/MB/GB string, for log lines.
+fn format_bytes_readable(bytes: i64) -> String {
+    crate::connection::format_kb_readable(bytes / 1024)
+}
+
+/// Format an optional last-maintained timestamp as "never" or "N.N days ago", for log lines.
+fn format_last_maintained(last_maintained: Option<std::time::SystemTime>) -> String {
+    match last_maintained {
+        None => "never".to_string(),
+        Some(t) => match std::time::SystemTime::now().duration_since(t) {
+            Ok(elapsed) => format!("{:.1} days ago", elapsed.as_secs_f64() / 86400.0),
+            Err(_) => "just now".to_string(),
+        },
+    }
+}
+
 /// Run VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE) on all wraparound candidates.
 /// If `force` is true, active vacuums on the table are terminated before starting.
 /// Otherwise tables with an active vacuum are skipped.
@@ -1123,12 +1174,14 @@ pub async fn run_freeze_wraparound(
         logger.log_with_context(
             LogLevel::Warning,
             &format!(
-                "Wraparound candidate: \"{}\".\"{}\" — XID age {} ({:.1}% of freeze_max_age {})",
+                "Wraparound candidate: \"{}\".\"{}\" — XID age {} ({:.1}% of freeze_max_age {}), size={}, last_maintained={}",
                 t.schema_name,
                 t.table_name,
                 t.xid_age,
                 t.pct_toward_wraparound(),
                 t.freeze_max_age,
+                format_bytes_readable(t.size_bytes),
+                format_last_maintained(t.last_maintained),
             ),
             LogContext {
                 schema: Some(&t.schema_name),

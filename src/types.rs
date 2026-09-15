@@ -90,6 +90,11 @@ pub struct TableInfo {
     pub n_live_tup: i64,
     /// Estimated dead row count — useful for ordering vacuum candidates
     pub n_dead_tup: i64,
+    /// On-disk size in bytes (pg_table_size), for --order-by size
+    pub size_bytes: i64,
+    /// GREATEST(last_vacuum, last_autovacuum) or GREATEST(last_analyze, last_autoanalyze)
+    /// depending on which operation this candidate feeds, for --order-by last-maintained
+    pub last_maintained: Option<std::time::SystemTime>,
 }
 
 /// A table that is a candidate for anti-wraparound freezing.
@@ -101,6 +106,10 @@ pub struct FreezeTableInfo {
     pub xid_age: i64,
     /// The autovacuum_freeze_max_age threshold read from the server at query time
     pub freeze_max_age: i64,
+    /// On-disk size in bytes (pg_table_size), for --order-by size
+    pub size_bytes: i64,
+    /// GREATEST(last_vacuum, last_autovacuum) from pg_stat_all_tables, for --order-by last-maintained
+    pub last_maintained: Option<std::time::SystemTime>,
 }
 
 impl FreezeTableInfo {
@@ -235,6 +244,41 @@ impl std::str::FromStr for Mode {
     }
 }
 
+/// Candidate table priority order within a phase's already-qualified rows.
+/// Candidacy (the WHERE clause) never changes — only which qualifying rows
+/// `--limit` keeps. `None` (the default) keeps each phase's own severity-based
+/// ordering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderBy {
+    /// Largest table (pg_table_size) first.
+    Size,
+    /// Least-recently-maintained table first; never-maintained tables sort first (NULLS FIRST).
+    LastMaintained,
+}
+
+impl std::fmt::Display for OrderBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            OrderBy::Size => write!(f, "size"),
+            OrderBy::LastMaintained => write!(f, "last-maintained"),
+        }
+    }
+}
+
+impl std::str::FromStr for OrderBy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "size" => Ok(OrderBy::Size),
+            "last-maintained" => Ok(OrderBy::LastMaintained),
+            _ => Err(format!(
+                "Invalid order-by '{s}'. Must be one of: size, last-maintained"
+            )),
+        }
+    }
+}
+
 /// A table that is a candidate for bloat cleanup (excessive dead tuples).
 #[derive(Debug, Clone)]
 pub struct BloatTableInfo {
@@ -244,6 +288,10 @@ pub struct BloatTableInfo {
     pub n_live_tup: i64,
     /// Estimated dead row count — used to compute bloat percentage
     pub n_dead_tup: i64,
+    /// On-disk size in bytes (pg_table_size), for --order-by size
+    pub size_bytes: i64,
+    /// GREATEST(last_vacuum, last_autovacuum), for --order-by last-maintained
+    pub last_maintained: Option<std::time::SystemTime>,
 }
 
 impl BloatTableInfo {
@@ -267,6 +315,10 @@ pub struct StaleStatsTableInfo {
     pub n_live_tup: i64,
     /// Rows inserted/updated/deleted since the last ANALYZE (manual or auto)
     pub n_mod_since_analyze: i64,
+    /// On-disk size in bytes (pg_table_size), for --order-by size
+    pub size_bytes: i64,
+    /// GREATEST(last_analyze, last_autoanalyze), for --order-by last-maintained
+    pub last_maintained: Option<std::time::SystemTime>,
 }
 
 impl StaleStatsTableInfo {

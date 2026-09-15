@@ -252,6 +252,58 @@ fn test_limit_applies_to_wraparound_mode() {
         .stderr(predicate::str::contains("Invalid mode").not());
 }
 
+// ── --order-by flag ─────────────────────────────────────────────────────────────
+
+#[test]
+fn test_order_by_size_flag_parses() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--order-by")
+        .arg("size")
+        .arg("--dry-run")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_order_by_last_maintained_flag_parses() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--order-by")
+        .arg("last-maintained")
+        .arg("--dry-run")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_order_by_invalid_value_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--order-by")
+        .arg("bogus")
+        .arg("--dry-run")
+        .env_clear()
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn test_order_by_omitted_by_default() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dry-run")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
 // ── Integration tests (requires live DB) ──────────────────────────────────────
 
 #[tokio::test]
