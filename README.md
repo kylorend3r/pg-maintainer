@@ -126,6 +126,10 @@ pg-maintainer -d mydb -s public --dry-run
 # Run gently on busy servers
 pg-maintainer -d mydb -s public --gentle
 
+# Rotate the log file daily (maintainer.log -> maintainer-2026-09-13.log);
+# old dated files are never deleted automatically — pair with logrotate or a cleanup cron
+pg-maintainer -d mydb -s public --log-rotation daily
+
 # Use a connection string and config file
 pg-maintainer --dsn "postgres://user@host:5432/mydb" -C config.toml
 ```

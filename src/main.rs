@@ -7,7 +7,7 @@ use pg_maintainer::config::{
 use pg_maintainer::connection::{self, ConnectionConfig};
 use pg_maintainer::logging::{LogLevel, Logger};
 use pg_maintainer::operations;
-use pg_maintainer::types::{LogFormat, Mode, OrderBy, SslMode};
+use pg_maintainer::types::{LogFormat, LogRotation, Mode, OrderBy, SslMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
@@ -278,6 +278,12 @@ struct Args {
     #[arg(long, default_value = "text", value_parser = clap::value_parser!(LogFormat))]
     log_format: LogFormat,
 
+    /// Rotate the log file daily by embedding the UTC date in its filename
+    /// (e.g. maintainer.log -> maintainer-2026-09-13.log). pg-maintainer never
+    /// deletes old dated files; use logrotate or a cleanup cron for retention.
+    #[arg(long, default_value = "none", value_parser = clap::value_parser!(LogRotation))]
+    log_rotation: LogRotation,
+
     /// Suppress terminal output; all logs still go to the log file
     #[arg(long, default_value = "false")]
     silence_mode: bool,
@@ -358,6 +364,7 @@ struct Config {
     ssl_client_key: Option<String>,
     log_file: Option<String>,
     log_format: Option<String>,
+    log_rotation: Option<String>,
     silence_mode: Option<bool>,
     statement_timeout_seconds: Option<u64>,
     connect_timeout_seconds: Option<u64>,
@@ -528,6 +535,12 @@ fn merge_config(file: Config, mut args: Args) -> Args {
         && let Ok(f) = lf.parse::<LogFormat>()
     {
         args.log_format = f;
+    }
+    if args.log_rotation == LogRotation::None
+        && let Some(ref lr) = file.log_rotation
+        && let Ok(r) = lr.parse::<LogRotation>()
+    {
+        args.log_rotation = r;
     }
     if !args.silence_mode {
         args.silence_mode = file.silence_mode.unwrap_or(false);
@@ -829,8 +842,14 @@ async fn main() -> Result<()> {
         ));
     }
 
+    let effective_log_file = pg_maintainer::logging::rotated_log_path(
+        &args.log_file,
+        args.log_rotation,
+        chrono::Utc::now().date_naive(),
+    );
+
     let logger = Arc::new(Logger::new(
-        args.log_file.clone(),
+        effective_log_file.clone(),
         args.silence_mode,
         args.log_format,
     ));
@@ -838,7 +857,7 @@ async fn main() -> Result<()> {
     if args.silence_mode {
         println!(
             "Starting pg-maintainer (silence mode — logs: {})",
-            args.log_file
+            effective_log_file
         );
     }
 

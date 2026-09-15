@@ -77,6 +77,9 @@ sslmode = "disable"   # disable | require | verify-ca | verify-full
 # ── Logging ───────────────────────────────────────────────────────────────────
 log-file     = "maintainer.log"
 log-format   = "text"    # text | json
+log-rotation = "none"    # none | daily — embeds the UTC date in the filename
+                          # (maintainer.log -> maintainer-2026-09-13.log); old
+                          # dated files are never deleted automatically
 silence-mode = false     # suppress terminal output; logs still written to file
 
 # ── Replica-lag gating ────────────────────────────────────────────────────────

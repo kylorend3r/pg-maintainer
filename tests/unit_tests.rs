@@ -7,9 +7,10 @@ use pg_maintainer::config::{
 };
 use pg_maintainer::credentials::get_password_from_pgpass;
 use pg_maintainer::dsn::{self, ParsedDsn};
+use pg_maintainer::logging::rotated_log_path;
 use pg_maintainer::queries;
 use pg_maintainer::types::{
-    BloatTableInfo, ExplicitTable, FreezeTableInfo, LagObservation, LogFormat, Mode,
+    BloatTableInfo, ExplicitTable, FreezeTableInfo, LagObservation, LogFormat, LogRotation, Mode,
     OperationSummary, OrderBy, ReplicaLagGate, SslMode, StandbyLag, TableInfo, ThrottleSettings,
 };
 use std::io::Write;
@@ -93,6 +94,98 @@ fn test_log_format_display() {
 #[test]
 fn test_log_format_default_is_text() {
     assert_eq!(LogFormat::default(), LogFormat::Text);
+}
+
+// ── LogRotation ────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_log_rotation_from_str() {
+    assert_eq!("none".parse::<LogRotation>().unwrap(), LogRotation::None);
+    assert_eq!("daily".parse::<LogRotation>().unwrap(), LogRotation::Daily);
+}
+
+#[test]
+fn test_log_rotation_from_str_case_insensitive() {
+    assert_eq!("NONE".parse::<LogRotation>().unwrap(), LogRotation::None);
+    assert_eq!("Daily".parse::<LogRotation>().unwrap(), LogRotation::Daily);
+}
+
+#[test]
+fn test_log_rotation_from_str_invalid() {
+    assert!("weekly".parse::<LogRotation>().is_err());
+    assert!("".parse::<LogRotation>().is_err());
+    assert!("hourly".parse::<LogRotation>().is_err());
+}
+
+#[test]
+fn test_log_rotation_display() {
+    assert_eq!(LogRotation::None.to_string(), "none");
+    assert_eq!(LogRotation::Daily.to_string(), "daily");
+}
+
+#[test]
+fn test_log_rotation_default_is_none() {
+    assert_eq!(LogRotation::default(), LogRotation::None);
+}
+
+// ── rotated_log_path ───────────────────────────────────────────────────────────
+
+#[test]
+fn test_rotated_log_path_none_passthrough() {
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 13).unwrap();
+    assert_eq!(
+        rotated_log_path("maintainer.log", LogRotation::None, date),
+        "maintainer.log"
+    );
+    assert_eq!(
+        rotated_log_path("/var/log/pg/custom.log", LogRotation::None, date),
+        "/var/log/pg/custom.log"
+    );
+}
+
+#[test]
+fn test_rotated_log_path_daily_filename_with_extension() {
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 13).unwrap();
+    assert_eq!(
+        rotated_log_path("maintainer.log", LogRotation::Daily, date),
+        "maintainer-2026-09-13.log"
+    );
+}
+
+#[test]
+fn test_rotated_log_path_daily_filename_without_extension() {
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 13).unwrap();
+    assert_eq!(
+        rotated_log_path("maintainer", LogRotation::Daily, date),
+        "maintainer-2026-09-13"
+    );
+}
+
+#[test]
+fn test_rotated_log_path_daily_absolute_path_with_directory() {
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 13).unwrap();
+    assert_eq!(
+        rotated_log_path("/var/log/pg/custom.log", LogRotation::Daily, date),
+        "/var/log/pg/custom-2026-09-13.log"
+    );
+}
+
+#[test]
+fn test_rotated_log_path_daily_absolute_path_without_extension() {
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 13).unwrap();
+    assert_eq!(
+        rotated_log_path("/var/log/pg/custom", LogRotation::Daily, date),
+        "/var/log/pg/custom-2026-09-13"
+    );
+}
+
+#[test]
+fn test_rotated_log_path_daily_relative_directory() {
+    let date = chrono::NaiveDate::from_ymd_opt(2026, 9, 13).unwrap();
+    assert_eq!(
+        rotated_log_path("logs/app.log", LogRotation::Daily, date),
+        "logs/app-2026-09-13.log"
+    );
 }
 
 // ── FreezeTableInfo ────────────────────────────────────────────────────────────

@@ -1,7 +1,8 @@
-use crate::types::LogFormat;
+use crate::types::{LogFormat, LogRotation};
 use serde::Serialize;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 const LOG_BUFFER_SIZE: usize = 8192;
@@ -56,6 +57,36 @@ struct LogEvent<'a> {
     xid_age: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<&'a str>,
+}
+
+/// Computes the effective log file path for a given rotation strategy and date.
+///
+/// `LogRotation::None` returns `log_file` unchanged. `LogRotation::Daily` inserts
+/// `-YYYY-MM-DD` before the file's extension, e.g. `maintainer.log` becomes
+/// `maintainer-2026-09-13.log`; a path with no extension gets the date suffix
+/// appended instead. Directory components are preserved unchanged.
+pub fn rotated_log_path(log_file: &str, rotation: LogRotation, date: chrono::NaiveDate) -> String {
+    if rotation == LogRotation::None {
+        return log_file.to_string();
+    }
+
+    let date_str = date.format("%Y-%m-%d");
+    let path = Path::new(log_file);
+
+    // Path::new("maintainer.log").parent() is Some("") for a bare filename,
+    // not None — treat that the same as "no parent" to avoid joining against "".
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty());
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+
+    let new_name = match path.extension() {
+        Some(ext) => format!("{stem}-{date_str}.{}", ext.to_string_lossy()),
+        None => format!("{stem}-{date_str}"),
+    };
+
+    match parent {
+        Some(p) => p.join(new_name).to_string_lossy().into_owned(),
+        None => new_name,
+    }
 }
 
 pub struct Logger {
