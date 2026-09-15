@@ -7,8 +7,8 @@ set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_FILE="${REPO_ROOT}/docker-compose.test.yml"
-SCHEMA_FIXTURE="${REPO_ROOT}/schema/setup_test_schema.sql"
+COMPOSE_FILE="${REPO_ROOT}/testing/docker-compose.test.yml"
+SCHEMA_FIXTURE="${REPO_ROOT}/testing/schema/setup_test_schema.sql"
 
 # Environment overrides
 PGBENCH_CLIENTS="${PGBENCH_CLIENTS:-10}"
@@ -58,7 +58,7 @@ main() {
   # Check prerequisites
   if [ ! -f "${SCHEMA_FIXTURE}" ]; then
     log_error "Schema fixture not found: ${SCHEMA_FIXTURE}"
-    log_error "Run from the repo root where schema/setup_test_schema.sql exists"
+    log_error "Run from the repo root where testing/schema/setup_test_schema.sql exists"
     exit 1
   fi
 

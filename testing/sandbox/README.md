@@ -11,8 +11,8 @@ container as the tool and trusts every local connection. Use the repository root
 ## Build and run
 
 ```bash
-# from the repository root, not from sandbox/
-docker build -f sandbox/Dockerfile -t pg-maintainer-sandbox .
+# from the repository root, not from testing/sandbox/
+docker build -f testing/sandbox/Dockerfile -t pg-maintainer-sandbox .
 docker run --rm -it pg-maintainer-sandbox
 ```
 
