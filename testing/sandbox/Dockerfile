@@ -2,7 +2,7 @@
 # container, pre-seeded with tables that trigger each maintenance mode.
 #
 # Build from the repository root:
-#   docker build -f sandbox/Dockerfile -t pg-maintainer-sandbox .
+#   docker build -f testing/sandbox/Dockerfile -t pg-maintainer-sandbox .
 #
 # This is a playground, not a deployment artifact. It runs a database as the same
 # process tree as the tool and trusts every local connection. Use the root
@@ -34,11 +34,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /build/target/release/pg-maintainer /usr/local/bin/pg-maintainer
 
-COPY sandbox/seed.sql /opt/sandbox/seed.sql
+COPY testing/sandbox/seed.sql /opt/sandbox/seed.sql
 COPY config.example.toml /opt/sandbox/config.example.toml
-COPY sandbox/entrypoint.sh /usr/local/bin/sandbox-entrypoint
-COPY sandbox/reseed /usr/local/bin/reseed
-COPY sandbox/tablestats /usr/local/bin/tablestats
+COPY testing/sandbox/entrypoint.sh /usr/local/bin/sandbox-entrypoint
+COPY testing/sandbox/reseed /usr/local/bin/reseed
+COPY testing/sandbox/tablestats /usr/local/bin/tablestats
 RUN chmod +x /usr/local/bin/sandbox-entrypoint \
              /usr/local/bin/reseed \
              /usr/local/bin/tablestats

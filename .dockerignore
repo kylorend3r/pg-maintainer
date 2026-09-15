@@ -1,5 +1,5 @@
 target/
-schema/
+testing/schema/
 plans-designs/
 *.log
 .git/

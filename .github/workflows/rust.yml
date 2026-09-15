@@ -102,7 +102,7 @@ jobs:
         env:
           PGPASSWORD: pgm_test
         run: |
-          psql -h localhost -U pgm_test -d pgm_test -f schema/setup_test_schema.sql
+          psql -h localhost -U pgm_test -d pgm_test -f testing/schema/setup_test_schema.sql
 
       - name: Run integration tests
         env:
