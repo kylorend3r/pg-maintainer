@@ -27,8 +27,6 @@ A single-threaded PostgreSQL table maintenance tool written in Rust. It runs fiv
 - [Installation](#installation)
 - [Usage](#usage)
 - [Environment Variables](#environment-variables)
-- [Command Line Interface](#command-line-interface)
-- [Key Features](#key-features)
 - [Config File](#config-file)
 - [License](#license)
 
@@ -41,8 +39,10 @@ A single-threaded PostgreSQL table maintenance tool written in Rust. It runs fiv
 | 3 | `wraparound` | `VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE)` | Tables whose XID age exceeds the wraparound threshold |
 | 4 | `bloated` | `VACUUM (VERBOSE)` | Tables with excessive dead tuples (bloat > threshold, default 80%) |
 | 5 | `stale-stats` | `ANALYZE` | Tables where modifications since last analyze exceed configured threshold |
+| 6 | `vacuum-overdue` (opt-in) | `VACUUM (VERBOSE)` | Tables not vacuumed in N days (requires `--vacuum-older-than-days`) |
+| 7 | `analyze-overdue` (opt-in) | `ANALYZE` | Tables not analyzed in M days (requires `--analyze-older-than-days`) |
 
-All five modes run in sequence on a single connection. Partitioned parent tables (declarative partitioning) are automatically excluded from discovery — their partitions are maintained individually. Select individual modes with `--mode` (default: all five). A table matched by an earlier mode in the same run is not reprocessed by a later mode.
+Modes 1–5 run by default in sequence on a single connection; modes 6–7 are opt-in. Partitioned parent tables (declarative partitioning) are automatically excluded from discovery — their partitions are maintained individually. Select individual modes with `--mode`; a table matched by an earlier mode in the same run is not reprocessed by a later mode.
 
 ## Installation
 
@@ -107,53 +107,27 @@ spec:
 ## Usage
 
 ```bash
-# Maintain all user schemas in a database
+# Maintain all schemas with default modes
 pg-maintainer -d mydb --discover-all-schemas
 
 # Maintain specific schemas
 pg-maintainer -d mydb -s public,analytics
 
-# Maintain a single table
-pg-maintainer -d mydb -s public -t users
-
-# Dry run — print commands without executing them
-pg-maintainer -d mydb -s public --dry-run
-
-# Run only never-vacuumed and bloated modes
+# Run only specific modes
 pg-maintainer -d mydb -s public --mode never-vacuumed,bloated
 
-# Detect bloat with custom threshold (70% instead of 80%)
-pg-maintainer -d mydb -s public --mode bloated --bloat-threshold-pct 70
+# Opt-in time-based maintenance
+pg-maintainer -d mydb -s public --mode vacuum-overdue,analyze-overdue \
+  --vacuum-older-than-days 30 --analyze-older-than-days 7
 
-# Limit each mode to top 5 tables by severity
-pg-maintainer -d mydb -s public --limit 5
+# Preview actions before running
+pg-maintainer -d mydb -s public --dry-run
 
-# Run stale-stats mode with custom analyze threshold
-pg-maintainer -d mydb -s public --mode stale-stats --analyze-threshold 100
-
-# Filter tables by size
-pg-maintainer -d mydb -s public --min-table-size-gb 0.5 --max-table-size-gb 10
-
-# Run gently on a busy OLTP server (cost delay 10ms, cost limit 200)
+# Run gently on busy servers
 pg-maintainer -d mydb -s public --gentle
 
-# Same, with a hand-picked cost pair
-pg-maintainer -d mydb -s public --vacuum-cost-delay-ms 20 --vacuum-cost-limit 400
-
-# Also maintain specific tables, whatever the thresholds say
-pg-maintainer -d mydb -s public --also-tables public.orders,public.customers
-
-# Yield to a lagging replica: wait before each table while replay lag exceeds 30s
-pg-maintainer -d mydb -s public --max-replica-lag-seconds 30
-
-# Pass the whole connection as one string
-pg-maintainer -s public --dsn "postgres://maintainer@db.internal:5432/mydb"
-
-# SSL connection to a remote server
-pg-maintainer -d mydb -s public -H prod-db.company.com --sslmode verify-full --ssl-ca-cert /path/to/ca.pem
-
-# Use a config file
-pg-maintainer -C config.toml
+# Use a connection string and config file
+pg-maintainer --dsn "postgres://user@host:5432/mydb" -C config.toml
 ```
 
 ## Environment Variables
@@ -178,117 +152,6 @@ Password resolution order: `--password` (CLI, emits an insecurity warning) → a
 Overall configuration precedence: CLI arguments → TOML config file (`-C`) → connection string (`--dsn`) → environment variables → defaults.
 
 A connection string sits below individually-named settings, so an explicit `--database` always beats the `dbname` bundled in a DSN.
-
-## Command Line Interface
-
-```
-pg-maintainer — PostgreSQL table maintenance: vacuum, analyze, and anti-wraparound freeze
-
-Usage: pg-maintainer [OPTIONS]
-
-Options:
-      --dsn <URI>
-          Connection string (postgres:// URI or libpq keyword string), or PG_DSN env var
-  -H, --host <HOST>
-          PostgreSQL host (or PG_HOST env var)
-  -p, --port <PORT>
-          PostgreSQL port (or PG_PORT env var)
-  -d, --database <DATABASE>
-          Database name (or PG_DATABASE env var)
-  -U, --username <USERNAME>
-          PostgreSQL username (or PG_USER env var)
-  -P, --password <PASSWORD>
-          Password. INSECURE: prefer PG_PASSWORD env var.
-  -s, --schema <SCHEMA>
-          Comma-separated schema names. Mutually exclusive with --discover-all-schemas.
-      --discover-all-schemas
-          Discover and maintain all user schemas (excludes system schemas)
-  -t, --table <TABLE>
-          Limit maintenance to a single table name
-  -f, --dry-run
-          Show what would be done without executing any maintenance commands
-      --mode <MODE>
-          Modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats
-      --force
-          Terminate a conflicting manual VACUUM before starting (autovacuum workers are always terminated automatically)
-      --limit <LIMIT>
-          Limit each mode to top N tables (default: unlimited)
-      --bloat-threshold-pct <BLOAT_THRESHOLD_PCT>
-          Bloat threshold percentage (default: 80.0). Tables with dead tuple ratio exceeding this percentage are considered bloat candidates [default: 80]
-      --analyze-threshold <ANALYZE_THRESHOLD>
-          Modification-count floor for stale-stats (default: read from server's autovacuum_analyze_threshold)
-      --analyze-scale-factor <ANALYZE_SCALE_FACTOR>
-          Scale factor for stale-stats (default: read from server's autovacuum_analyze_scale_factor)
-      --min-table-size-gb <GB>
-          Minimum table size in GB (default: 0, no floor)
-      --max-table-size-gb <GB>
-          Maximum table size in GB (default: none, no ceiling)
-      --wraparound-min-age <WRAPAROUND_MIN_AGE>
-          Minimum XID age threshold for wraparound candidates (default: 200000000) [default: 200000000]
-      --wraparound-pct <PCT>
-          Wraparound threshold as % of autovacuum_freeze_max_age (0–100). Overrides --wraparound-min-age.
-  -w, --maintenance-work-mem-gb <MAINTENANCE_WORK_MEM_GB>
-          maintenance_work_mem in GB for this session (default: 1, max: 32) [default: 1]
-      --vacuum-cost-delay-ms <MS>
-          Session vacuum_cost_delay in ms (0-100). Throttles VACUUM/ANALYZE I/O.
-      --vacuum-cost-limit <N>
-          Session vacuum_cost_limit (1-10000). Cost budget between delays.
-      --gentle
-          Throttle preset: vacuum_cost_delay 10ms, vacuum_cost_limit 200
-      --max-replica-lag-seconds <SECONDS>
-          Wait before each table while replica replay lag exceeds this (default: no gating)
-      --max-replica-lag-wait-seconds <SECONDS>
-          Max wait per table for replica lag to recover; 0 = skip immediately [default: 300]
-      --also-tables <SCHEMA.TABLE,...>
-          Also VACUUM (ANALYZE) these schema-qualified tables after the selected modes
-      --sslmode <SSLMODE>
-          [default: disable]
-      --ssl-ca-cert <SSL_CA_CERT>
-          Path to CA certificate (.pem) for SSL
-      --ssl-client-cert <SSL_CLIENT_CERT>
-          Path to client certificate (.pem). Requires --ssl-client-key.
-      --ssl-client-key <SSL_CLIENT_KEY>
-          Path to client private key (.pem). Requires --ssl-client-cert.
-  -l, --log-file <LOG_FILE>
-          [default: maintainer.log]
-      --log-format <LOG_FORMAT>
-          [default: text]
-      --silence-mode
-          Suppress terminal output; all logs still go to the log file
-      --statement-timeout-seconds <STATEMENT_TIMEOUT_SECONDS>
-          Statement timeout in seconds for each VACUUM/ANALYZE operation (default: 0 = unbounded). Set this for unattended runs to prevent VACUUM from running indefinitely if it gets stuck [default: 0]
-      --connect-timeout-seconds <CONNECT_TIMEOUT_SECONDS>
-          TCP connection timeout in seconds (default: 10). A network partition can hang startup for the OS default; this bounds that [default: 10]
-  -C, --config <FILE>
-          Path to a TOML configuration file. CLI arguments take precedence
-  -h, --help
-          Print help
-  -V, --version
-          Print version
-```
-
-## Key Features
-
-- **Selective modes**: run any combination of `never-vacuumed`, `never-analyzed`, `wraparound`, `bloated`, `stale-stats` via `--mode`; omit it to run all five
-- **Cross-mode dedup**: a table already handled by an earlier mode in the same run is skipped by later modes instead of being reprocessed
-- **Statistics-based bloat detection**: dead-tuple ratio from `pg_stat_user_tables`, no extension or extra table scan required
-- **Size filtering**: `--min-table-size-gb`/`--max-table-size-gb` apply across all five modes
-- **Active-vacuum awareness**: tables with a conflicting VACUUM/autovacuum in progress are skipped, or the conflicting backend is terminated with `--force`
-- **Concurrency guard**: per-schema advisory lock prevents two pg-maintainer instances from running against the same schema simultaneously
-- **Bounded execution**: `--statement-timeout-seconds` (default: unbounded) limits how long a single VACUUM/ANALYZE can run; `--connect-timeout-seconds` (default: 10s) bounds TCP connection establishment
-- **Graceful shutdown**: SIGTERM and SIGINT signal handlers stop after the current table, run the final summary, and exit cleanly
-- **Fast-fail locking**: 10ms `lock_timeout` for the session so runs never block indefinitely behind another process's lock
-- **Automatic session tuning**: `vacuum_buffer_usage_limit` is set to 1/16 of `shared_buffers` (PostgreSQL 16+) and `max_parallel_maintenance_workers` is raised to match the server's `max_parallel_workers`, so VACUUM's index-cleanup phase can use the full parallel worker pool instead of the low built-in default. Both are session-scoped `SET`s, no server config changes required. Neither affects Phase 3 (freeze), which runs with `INDEX_CLEANUP FALSE`.
-- **Connection strings**: pass a single `postgres://` URI or libpq keyword string via `--dsn` / `PG_DSN`, instead of five separate flags. TLS parameters (`sslmode`, `sslrootcert`, `sslcert`, `sslkey`) are honored.
-- **I/O throttling**: `--gentle` (or explicit `--vacuum-cost-delay-ms`/`--vacuum-cost-limit`) makes maintenance yield to production traffic instead of running as fast as the storage allows. Opt-in; the speed tuning above stays the default.
-- **Replica-lag awareness**: `--max-replica-lag-seconds` waits before each table while a standby's replay lag exceeds the threshold. Off unless set.
-- **Explicit table list**: `--also-tables` runs `VACUUM (ANALYZE)` on named tables after the selected modes, in addition to them.
-- **Wraparound tuning**: flag candidates by absolute XID age (`--wraparound-min-age`) or by percentage of `autovacuum_freeze_max_age` (`--wraparound-pct`)
-- **SSL/TLS**: `disable`/`require`/`verify-ca`/`verify-full`, with custom CA and mutual TLS support
-- **Multiple credential sources**: `PG_PASSWORD`, `PG_PASSWORD_FILE` (Docker/Kubernetes secrets), `.pgpass`/`$PGPASSFILE`, or CLI flag
-- **Config file**: TOML configuration with env-var interpolation (`password = "${PG_PASSWORD}"`) and CLI override support
-- **Structured logging**: text or JSON log format, optional silence mode, buffered file + stdout output
-- **Dry run**: preview every VACUUM/ANALYZE candidate and command before anything executes
 
 ## Config File
 

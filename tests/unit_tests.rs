@@ -10,7 +10,7 @@ use pg_maintainer::dsn::{self, ParsedDsn};
 use pg_maintainer::queries;
 use pg_maintainer::types::{
     BloatTableInfo, ExplicitTable, FreezeTableInfo, LagObservation, LogFormat, Mode,
-    OperationSummary, ReplicaLagGate, SslMode, StandbyLag, TableInfo, ThrottleSettings,
+    OperationSummary, OrderBy, ReplicaLagGate, SslMode, StandbyLag, TableInfo, ThrottleSettings,
 };
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -104,6 +104,8 @@ fn test_pct_toward_wraparound_normal() {
         table_name: "orders".into(),
         xid_age: 100_000_000,
         freeze_max_age: 200_000_000,
+        size_bytes: 0,
+        last_maintained: None,
     };
     assert!((info.pct_toward_wraparound() - 50.0).abs() < 0.001);
 }
@@ -115,6 +117,8 @@ fn test_pct_toward_wraparound_at_threshold() {
         table_name: "t".into(),
         xid_age: 200_000_000,
         freeze_max_age: 200_000_000,
+        size_bytes: 0,
+        last_maintained: None,
     };
     assert!((info.pct_toward_wraparound() - 100.0).abs() < 0.001);
 }
@@ -126,6 +130,8 @@ fn test_pct_toward_wraparound_exceeds_threshold() {
         table_name: "t".into(),
         xid_age: 300_000_000,
         freeze_max_age: 200_000_000,
+        size_bytes: 0,
+        last_maintained: None,
     };
     assert!(info.pct_toward_wraparound() > 100.0);
 }
@@ -137,6 +143,8 @@ fn test_pct_toward_wraparound_zero_max_age() {
         table_name: "t".into(),
         xid_age: 1,
         freeze_max_age: 0,
+        size_bytes: 0,
+        last_maintained: None,
     };
     // Division by zero guard: returns 100.0
     assert!((info.pct_toward_wraparound() - 100.0).abs() < 0.001);
@@ -151,11 +159,15 @@ fn test_table_info_construction() {
         table_name: "users".into(),
         n_live_tup: 50_000,
         n_dead_tup: 200,
+        size_bytes: 1_048_576,
+        last_maintained: None,
     };
     assert_eq!(t.schema_name, "public");
     assert_eq!(t.table_name, "users");
     assert_eq!(t.n_live_tup, 50_000);
     assert_eq!(t.n_dead_tup, 200);
+    assert_eq!(t.size_bytes, 1_048_576);
+    assert_eq!(t.last_maintained, None);
 }
 
 // ── OperationSummary ───────────────────────────────────────────────────────────
@@ -275,6 +287,14 @@ fn test_mode_from_str_all_variants() {
     assert_eq!("wraparound".parse::<Mode>().unwrap(), Mode::Wraparound);
     assert_eq!("bloated".parse::<Mode>().unwrap(), Mode::Bloated);
     assert_eq!("stale-stats".parse::<Mode>().unwrap(), Mode::StaleStats);
+    assert_eq!(
+        "vacuum-overdue".parse::<Mode>().unwrap(),
+        Mode::VacuumOverdue
+    );
+    assert_eq!(
+        "analyze-overdue".parse::<Mode>().unwrap(),
+        Mode::AnalyzeOverdue
+    );
 }
 
 #[test]
@@ -306,6 +326,41 @@ fn test_mode_display() {
     assert_eq!(Mode::Wraparound.to_string(), "wraparound");
     assert_eq!(Mode::Bloated.to_string(), "bloated");
     assert_eq!(Mode::StaleStats.to_string(), "stale-stats");
+    assert_eq!(Mode::VacuumOverdue.to_string(), "vacuum-overdue");
+    assert_eq!(Mode::AnalyzeOverdue.to_string(), "analyze-overdue");
+}
+
+// ── OrderBy ────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_order_by_from_str_all_variants() {
+    assert_eq!("size".parse::<OrderBy>().unwrap(), OrderBy::Size);
+    assert_eq!(
+        "last-maintained".parse::<OrderBy>().unwrap(),
+        OrderBy::LastMaintained
+    );
+}
+
+#[test]
+fn test_order_by_from_str_case_insensitive() {
+    assert_eq!("SIZE".parse::<OrderBy>().unwrap(), OrderBy::Size);
+    assert_eq!(
+        "Last-Maintained".parse::<OrderBy>().unwrap(),
+        OrderBy::LastMaintained
+    );
+}
+
+#[test]
+fn test_order_by_from_str_invalid() {
+    assert!("invalid".parse::<OrderBy>().is_err());
+    assert!("".parse::<OrderBy>().is_err());
+    assert!("bloat".parse::<OrderBy>().is_err());
+}
+
+#[test]
+fn test_order_by_display() {
+    assert_eq!(OrderBy::Size.to_string(), "size");
+    assert_eq!(OrderBy::LastMaintained.to_string(), "last-maintained");
 }
 
 // ── BloatTableInfo ────────────────────────────────────────────────────────────
@@ -317,6 +372,8 @@ fn test_bloat_table_info_pct_bloat_full_bloat() {
         table_name: "test".to_string(),
         n_live_tup: 100,
         n_dead_tup: 400, // 80% bloat
+        size_bytes: 0,
+        last_maintained: None,
     };
     assert_eq!(info.pct_bloat(), 80.0);
 }
@@ -328,6 +385,8 @@ fn test_bloat_table_info_pct_bloat_zero() {
         table_name: "test".to_string(),
         n_live_tup: 100,
         n_dead_tup: 0,
+        size_bytes: 0,
+        last_maintained: None,
     };
     assert_eq!(info.pct_bloat(), 0.0);
 }
@@ -339,6 +398,8 @@ fn test_bloat_table_info_pct_bloat_100() {
         table_name: "test".to_string(),
         n_live_tup: 0,
         n_dead_tup: 100,
+        size_bytes: 0,
+        last_maintained: None,
     };
     assert_eq!(info.pct_bloat(), 100.0);
 }
@@ -350,6 +411,8 @@ fn test_bloat_table_info_pct_bloat_empty_table() {
         table_name: "test".to_string(),
         n_live_tup: 0,
         n_dead_tup: 0, // Empty table
+        size_bytes: 0,
+        last_maintained: None,
     };
     assert_eq!(info.pct_bloat(), 0.0);
 }
@@ -380,6 +443,97 @@ fn test_wraparound_query_excludes_system_schemas() {
         queries::FIND_WRAPAROUND_CANDIDATES.contains("'information_schema'"),
         "wraparound query must exclude information_schema"
     );
+}
+
+// ── --order-by query variants ─────────────────────────────────────────────────
+
+#[test]
+fn test_order_by_size_variants_order_by_size_bytes_desc() {
+    let queries_to_check = [
+        queries::FIND_NEVER_VACUUMED_BY_SIZE,
+        queries::FIND_NEVER_ANALYZED_BY_SIZE,
+        queries::FIND_WRAPAROUND_CANDIDATES_BY_SIZE,
+        queries::FIND_BLOAT_CANDIDATES_BY_SIZE,
+        queries::FIND_STALE_STATS_BY_SIZE,
+    ];
+    for q in queries_to_check {
+        assert!(
+            q.contains("ORDER BY size_bytes DESC"),
+            "BY_SIZE variant must order by size_bytes DESC: {q}"
+        );
+        assert!(
+            q.contains("AS size_bytes"),
+            "BY_SIZE variant must select size_bytes: {q}"
+        );
+        assert!(
+            q.contains("AS last_maintained"),
+            "BY_SIZE variant must also select last_maintained: {q}"
+        );
+    }
+}
+
+#[test]
+fn test_order_by_last_maintained_variants_order_by_nulls_first() {
+    let queries_to_check = [
+        queries::FIND_NEVER_VACUUMED_BY_LAST_MAINTAINED,
+        queries::FIND_NEVER_ANALYZED_BY_LAST_MAINTAINED,
+        queries::FIND_WRAPAROUND_CANDIDATES_BY_LAST_MAINTAINED,
+        queries::FIND_BLOAT_CANDIDATES_BY_LAST_MAINTAINED,
+        queries::FIND_STALE_STATS_BY_LAST_MAINTAINED,
+    ];
+    for q in queries_to_check {
+        assert!(
+            q.contains("ORDER BY last_maintained ASC NULLS FIRST"),
+            "BY_LAST_MAINTAINED variant must order by last_maintained ASC NULLS FIRST: {q}"
+        );
+        assert!(
+            q.contains("AS size_bytes"),
+            "BY_LAST_MAINTAINED variant must also select size_bytes: {q}"
+        );
+    }
+}
+
+#[test]
+fn test_default_severity_queries_also_return_size_and_last_maintained() {
+    // The default (no --order-by) consts keep their severity ordering, but must
+    // still return size_bytes/last_maintained so the shared row-mapping code in
+    // operations.rs works unchanged regardless of which --order-by was requested.
+    let queries_to_check = [
+        queries::FIND_NEVER_VACUUMED,
+        queries::FIND_NEVER_ANALYZED,
+        queries::FIND_WRAPAROUND_CANDIDATES,
+        queries::FIND_BLOAT_CANDIDATES,
+        queries::FIND_STALE_STATS,
+        queries::FIND_NEVER_VACUUMED_TABLE,
+        queries::FIND_NEVER_ANALYZED_TABLE,
+        queries::FIND_WRAPAROUND_CANDIDATES_TABLE,
+        queries::FIND_BLOAT_CANDIDATES_TABLE,
+        queries::FIND_STALE_STATS_TABLE,
+    ];
+    for q in queries_to_check {
+        assert!(q.contains("AS size_bytes"), "must select size_bytes: {q}");
+        assert!(
+            q.contains("AS last_maintained"),
+            "must select last_maintained: {q}"
+        );
+    }
+}
+
+#[test]
+fn test_wraparound_last_maintained_uses_pg_stat_all_tables() {
+    // Wraparound candidates include TOAST tables, which live outside
+    // pg_stat_user_tables's schema filter — must use pg_stat_all_tables instead.
+    for q in [
+        queries::FIND_WRAPAROUND_CANDIDATES,
+        queries::FIND_WRAPAROUND_CANDIDATES_BY_SIZE,
+        queries::FIND_WRAPAROUND_CANDIDATES_BY_LAST_MAINTAINED,
+        queries::FIND_WRAPAROUND_CANDIDATES_TABLE,
+    ] {
+        assert!(
+            q.contains("pg_stat_all_tables"),
+            "wraparound queries must join pg_stat_all_tables for last_maintained: {q}"
+        );
+    }
 }
 
 // ── ThrottleSettings ──────────────────────────────────────────────────────────

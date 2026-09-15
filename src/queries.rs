@@ -18,8 +18,10 @@ pub const GET_ALL_USER_SCHEMAS: &str = r#"
 
 /// Tables that have NEVER been vacuumed (neither manual nor autovacuum).
 ///
-/// Ordered by dead tuple count descending so the most bloated tables come first.
-/// Excludes partitioned parent tables (relkind = 'p').
+/// Default ordering: dead tuple count descending so the most bloated tables come first.
+/// Excludes partitioned parent tables (relkind = 'p'). `last_maintained` is always
+/// NULL for this mode by definition (candidacy requires both timestamps NULL) — it
+/// is still returned so the shared row-mapping code in operations.rs works unchanged.
 /// Parameters:
 ///   $1 = array of schema names (text[])
 ///   $2 = minimum table size in bytes (i64)
@@ -30,7 +32,9 @@ pub const FIND_NEVER_VACUUMED: &str = r#"
         t.schemaname,
         t.relname AS tablename,
         COALESCE(t.n_live_tup, -1)  AS n_live_tup,
-        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup
+        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup,
+        pg_table_size(t.relid)      AS size_bytes,
+        GREATEST(t.last_vacuum, t.last_autovacuum) AS last_maintained
     FROM pg_stat_user_tables t
     JOIN pg_class c ON c.oid = t.relid
     WHERE t.schemaname = ANY($1::text[])
@@ -40,6 +44,50 @@ pub const FIND_NEVER_VACUUMED: &str = r#"
       AND pg_table_size(t.relid) BETWEEN $2 AND $3
     ORDER BY t.n_dead_tup DESC NULLS LAST,
              t.n_live_tup DESC NULLS LAST
+    LIMIT $4;
+"#;
+
+/// Same as FIND_NEVER_VACUUMED, ordered by table size descending (largest first).
+/// Parameters: same as FIND_NEVER_VACUUMED.
+pub const FIND_NEVER_VACUUMED_BY_SIZE: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1)  AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup,
+        pg_table_size(t.relid)      AS size_bytes,
+        GREATEST(t.last_vacuum, t.last_autovacuum) AS last_maintained
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND c.relkind != 'p'
+      AND t.last_vacuum     IS NULL
+      AND t.last_autovacuum IS NULL
+      AND pg_table_size(t.relid) BETWEEN $2 AND $3
+    ORDER BY size_bytes DESC
+    LIMIT $4;
+"#;
+
+/// Same as FIND_NEVER_VACUUMED, ordered by last-maintained ascending (NULLS FIRST).
+/// Every row is NULL for this mode by definition, so this ordering is a no-op tie —
+/// still provided for API symmetry across all 5 modes.
+/// Parameters: same as FIND_NEVER_VACUUMED.
+pub const FIND_NEVER_VACUUMED_BY_LAST_MAINTAINED: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1)  AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup,
+        pg_table_size(t.relid)      AS size_bytes,
+        GREATEST(t.last_vacuum, t.last_autovacuum) AS last_maintained
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND c.relkind != 'p'
+      AND t.last_vacuum     IS NULL
+      AND t.last_autovacuum IS NULL
+      AND pg_table_size(t.relid) BETWEEN $2 AND $3
+    ORDER BY last_maintained ASC NULLS FIRST
     LIMIT $4;
 "#;
 
@@ -54,7 +102,9 @@ pub const FIND_NEVER_VACUUMED_TABLE: &str = r#"
         t.schemaname,
         t.relname AS tablename,
         COALESCE(t.n_live_tup, -1)  AS n_live_tup,
-        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup
+        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup,
+        pg_table_size(t.relid)      AS size_bytes,
+        GREATEST(t.last_vacuum, t.last_autovacuum) AS last_maintained
     FROM pg_stat_user_tables t
     JOIN pg_class c ON c.oid = t.relid
     WHERE t.schemaname = ANY($1::text[])
@@ -69,8 +119,10 @@ pub const FIND_NEVER_VACUUMED_TABLE: &str = r#"
 
 /// Tables that have NEVER been analyzed (neither manual nor autoanalyze).
 ///
-/// Ordered by estimated live row count descending (largest tables first).
-/// Excludes partitioned parent tables (relkind = 'p').
+/// Default ordering: estimated live row count descending (largest tables first).
+/// Excludes partitioned parent tables (relkind = 'p'). `last_maintained` is always
+/// NULL for this mode by definition (candidacy requires both timestamps NULL) — it
+/// is still returned so the shared row-mapping code in operations.rs works unchanged.
 /// Parameters:
 ///   $1 = array of schema names (text[])
 ///   $2 = minimum table size in bytes (i64)
@@ -81,7 +133,9 @@ pub const FIND_NEVER_ANALYZED: &str = r#"
         t.schemaname,
         t.relname AS tablename,
         COALESCE(t.n_live_tup, -1) AS n_live_tup,
-        COALESCE(t.n_dead_tup, -1) AS n_dead_tup
+        COALESCE(t.n_dead_tup, -1) AS n_dead_tup,
+        pg_table_size(t.relid)     AS size_bytes,
+        GREATEST(t.last_analyze, t.last_autoanalyze) AS last_maintained
     FROM pg_stat_user_tables t
     JOIN pg_class c ON c.oid = t.relid
     WHERE t.schemaname = ANY($1::text[])
@@ -90,6 +144,50 @@ pub const FIND_NEVER_ANALYZED: &str = r#"
       AND t.last_autoanalyze IS NULL
       AND pg_table_size(t.relid) BETWEEN $2 AND $3
     ORDER BY t.n_live_tup DESC NULLS LAST
+    LIMIT $4;
+"#;
+
+/// Same as FIND_NEVER_ANALYZED, ordered by table size descending (largest first).
+/// Parameters: same as FIND_NEVER_ANALYZED.
+pub const FIND_NEVER_ANALYZED_BY_SIZE: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1) AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1) AS n_dead_tup,
+        pg_table_size(t.relid)     AS size_bytes,
+        GREATEST(t.last_analyze, t.last_autoanalyze) AS last_maintained
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND c.relkind != 'p'
+      AND t.last_analyze     IS NULL
+      AND t.last_autoanalyze IS NULL
+      AND pg_table_size(t.relid) BETWEEN $2 AND $3
+    ORDER BY size_bytes DESC
+    LIMIT $4;
+"#;
+
+/// Same as FIND_NEVER_ANALYZED, ordered by last-maintained ascending (NULLS FIRST).
+/// Every row is NULL for this mode by definition, so this ordering is a no-op tie —
+/// still provided for API symmetry across all 5 modes.
+/// Parameters: same as FIND_NEVER_ANALYZED.
+pub const FIND_NEVER_ANALYZED_BY_LAST_MAINTAINED: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1) AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1) AS n_dead_tup,
+        pg_table_size(t.relid)     AS size_bytes,
+        GREATEST(t.last_analyze, t.last_autoanalyze) AS last_maintained
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND c.relkind != 'p'
+      AND t.last_analyze     IS NULL
+      AND t.last_autoanalyze IS NULL
+      AND pg_table_size(t.relid) BETWEEN $2 AND $3
+    ORDER BY last_maintained ASC NULLS FIRST
     LIMIT $4;
 "#;
 
@@ -104,7 +202,9 @@ pub const FIND_NEVER_ANALYZED_TABLE: &str = r#"
         t.schemaname,
         t.relname AS tablename,
         COALESCE(t.n_live_tup, -1) AS n_live_tup,
-        COALESCE(t.n_dead_tup, -1) AS n_dead_tup
+        COALESCE(t.n_dead_tup, -1) AS n_dead_tup,
+        pg_table_size(t.relid)     AS size_bytes,
+        GREATEST(t.last_analyze, t.last_autoanalyze) AS last_maintained
     FROM pg_stat_user_tables t
     JOIN pg_class c ON c.oid = t.relid
     WHERE t.schemaname = ANY($1::text[])
@@ -123,6 +223,10 @@ pub const FIND_NEVER_ANALYZED_TABLE: &str = r#"
 /// System schemas (pg_catalog, information_schema, pg_toast) are excluded because
 /// PostgreSQL manages freezing for those itself.
 ///
+/// Default ordering: XID age descending (worst first). Uses pg_stat_all_tables (not
+/// pg_stat_user_tables) for last_maintained because the candidate set includes TOAST
+/// tables, which live outside pg_stat_user_tables's schema filter.
+///
 /// Parameters:
 ///   $1 = array of schema names (text[])
 ///   $2 = minimum XID age threshold (bigint) — defaults to autovacuum_freeze_max_age
@@ -134,15 +238,62 @@ pub const FIND_WRAPAROUND_CANDIDATES: &str = r#"
         n.nspname                                               AS schema_name,
         c.relname                                               AS table_name,
         age(c.relfrozenxid)::bigint                             AS xid_age,
-        current_setting('autovacuum_freeze_max_age')::bigint    AS freeze_max_age
+        current_setting('autovacuum_freeze_max_age')::bigint    AS freeze_max_age,
+        pg_table_size(c.oid)                                    AS size_bytes,
+        GREATEST(su.last_vacuum, su.last_autovacuum)            AS last_maintained
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_stat_all_tables su ON su.relid = c.oid
     WHERE c.relkind IN ('r', 't', 'm')
       AND n.nspname = ANY($1::text[])
       AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
       AND age(c.relfrozenxid) > $2::bigint
       AND pg_table_size(c.oid) BETWEEN $3 AND $4
     ORDER BY age(c.relfrozenxid) DESC
+    LIMIT $5;
+"#;
+
+/// Same as FIND_WRAPAROUND_CANDIDATES, ordered by table size descending (largest first).
+/// Parameters: same as FIND_WRAPAROUND_CANDIDATES.
+pub const FIND_WRAPAROUND_CANDIDATES_BY_SIZE: &str = r#"
+    SELECT
+        n.nspname                                               AS schema_name,
+        c.relname                                               AS table_name,
+        age(c.relfrozenxid)::bigint                             AS xid_age,
+        current_setting('autovacuum_freeze_max_age')::bigint    AS freeze_max_age,
+        pg_table_size(c.oid)                                    AS size_bytes,
+        GREATEST(su.last_vacuum, su.last_autovacuum)            AS last_maintained
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_stat_all_tables su ON su.relid = c.oid
+    WHERE c.relkind IN ('r', 't', 'm')
+      AND n.nspname = ANY($1::text[])
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+      AND age(c.relfrozenxid) > $2::bigint
+      AND pg_table_size(c.oid) BETWEEN $3 AND $4
+    ORDER BY size_bytes DESC
+    LIMIT $5;
+"#;
+
+/// Same as FIND_WRAPAROUND_CANDIDATES, ordered by last-maintained ascending (oldest/never first).
+/// Parameters: same as FIND_WRAPAROUND_CANDIDATES.
+pub const FIND_WRAPAROUND_CANDIDATES_BY_LAST_MAINTAINED: &str = r#"
+    SELECT
+        n.nspname                                               AS schema_name,
+        c.relname                                               AS table_name,
+        age(c.relfrozenxid)::bigint                             AS xid_age,
+        current_setting('autovacuum_freeze_max_age')::bigint    AS freeze_max_age,
+        pg_table_size(c.oid)                                    AS size_bytes,
+        GREATEST(su.last_vacuum, su.last_autovacuum)            AS last_maintained
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_stat_all_tables su ON su.relid = c.oid
+    WHERE c.relkind IN ('r', 't', 'm')
+      AND n.nspname = ANY($1::text[])
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+      AND age(c.relfrozenxid) > $2::bigint
+      AND pg_table_size(c.oid) BETWEEN $3 AND $4
+    ORDER BY last_maintained ASC NULLS FIRST
     LIMIT $5;
 "#;
 
@@ -158,9 +309,12 @@ pub const FIND_WRAPAROUND_CANDIDATES_TABLE: &str = r#"
         n.nspname                                               AS schema_name,
         c.relname                                               AS table_name,
         age(c.relfrozenxid)::bigint                             AS xid_age,
-        current_setting('autovacuum_freeze_max_age')::bigint    AS freeze_max_age
+        current_setting('autovacuum_freeze_max_age')::bigint    AS freeze_max_age,
+        pg_table_size(c.oid)                                    AS size_bytes,
+        GREATEST(su.last_vacuum, su.last_autovacuum)            AS last_maintained
     FROM pg_class c
     JOIN pg_namespace n ON n.oid = c.relnamespace
+    LEFT JOIN pg_stat_all_tables su ON su.relid = c.oid
     WHERE c.relkind IN ('r', 't', 'm')
       AND n.nspname = ANY($1::text[])
       AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
@@ -189,7 +343,7 @@ pub const GET_ANALYZE_SETTINGS: &str = r#"
 
 /// Tables with excessive dead tuples (bloat candidates).
 ///
-/// Ordered by bloat percentage descending (worst first).
+/// Default ordering: bloat percentage descending (worst first).
 /// Excludes partitioned parent tables (relkind = 'p').
 /// Parameters:
 ///   $1 = array of schema names (text[])
@@ -203,7 +357,9 @@ pub const FIND_BLOAT_CANDIDATES: &str = r#"
         t.schemaname,
         t.relname AS tablename,
         COALESCE(t.n_live_tup, -1)  AS n_live_tup,
-        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup
+        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup,
+        pg_table_size(t.relid)      AS size_bytes,
+        GREATEST(t.last_vacuum, t.last_autovacuum) AS last_maintained
     FROM pg_stat_user_tables t
     JOIN pg_class c ON c.oid = t.relid
     WHERE t.schemaname = ANY($1::text[])
@@ -212,6 +368,48 @@ pub const FIND_BLOAT_CANDIDATES: &str = r#"
       AND pg_table_size(t.relid) BETWEEN $4 AND $5
       AND (100.0 * t.n_dead_tup / NULLIF(t.n_live_tup + t.n_dead_tup, 0)) >= $2::float8
     ORDER BY (100.0 * t.n_dead_tup / NULLIF(t.n_live_tup + t.n_dead_tup, 0)) DESC
+    LIMIT $6;
+"#;
+
+/// Same as FIND_BLOAT_CANDIDATES, ordered by table size descending (largest first).
+/// Parameters: same as FIND_BLOAT_CANDIDATES.
+pub const FIND_BLOAT_CANDIDATES_BY_SIZE: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1)  AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup,
+        pg_table_size(t.relid)      AS size_bytes,
+        GREATEST(t.last_vacuum, t.last_autovacuum) AS last_maintained
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND c.relkind != 'p'
+      AND t.n_dead_tup >= $3
+      AND pg_table_size(t.relid) BETWEEN $4 AND $5
+      AND (100.0 * t.n_dead_tup / NULLIF(t.n_live_tup + t.n_dead_tup, 0)) >= $2::float8
+    ORDER BY size_bytes DESC
+    LIMIT $6;
+"#;
+
+/// Same as FIND_BLOAT_CANDIDATES, ordered by last-maintained ascending (oldest/never first).
+/// Parameters: same as FIND_BLOAT_CANDIDATES.
+pub const FIND_BLOAT_CANDIDATES_BY_LAST_MAINTAINED: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1)  AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup,
+        pg_table_size(t.relid)      AS size_bytes,
+        GREATEST(t.last_vacuum, t.last_autovacuum) AS last_maintained
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND c.relkind != 'p'
+      AND t.n_dead_tup >= $3
+      AND pg_table_size(t.relid) BETWEEN $4 AND $5
+      AND (100.0 * t.n_dead_tup / NULLIF(t.n_live_tup + t.n_dead_tup, 0)) >= $2::float8
+    ORDER BY last_maintained ASC NULLS FIRST
     LIMIT $6;
 "#;
 
@@ -228,7 +426,9 @@ pub const FIND_BLOAT_CANDIDATES_TABLE: &str = r#"
         t.schemaname,
         t.relname AS tablename,
         COALESCE(t.n_live_tup, -1)  AS n_live_tup,
-        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup
+        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup,
+        pg_table_size(t.relid)      AS size_bytes,
+        GREATEST(t.last_vacuum, t.last_autovacuum) AS last_maintained
     FROM pg_stat_user_tables t
     JOIN pg_class c ON c.oid = t.relid
     WHERE t.schemaname = ANY($1::text[])
@@ -262,7 +462,7 @@ pub const FIND_ACTIVE_VACUUMS_ON_TABLE: &str = r#"
 /// statistics are likely stale, based on the same math PostgreSQL's own
 /// autovacuum uses (analyze_threshold + analyze_scale_factor * n_live_tup).
 ///
-/// Ordered by n_mod_since_analyze descending (most drift first).
+/// Default ordering: n_mod_since_analyze descending (most drift first).
 /// Excludes partitioned parent tables (relkind = 'p').
 /// Parameters:
 ///   $1 = array of schema names (text[])
@@ -276,7 +476,9 @@ pub const FIND_STALE_STATS: &str = r#"
         t.schemaname,
         t.relname AS tablename,
         COALESCE(t.n_live_tup, -1)          AS n_live_tup,
-        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze
+        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze,
+        pg_table_size(t.relid)              AS size_bytes,
+        GREATEST(t.last_analyze, t.last_autoanalyze) AS last_maintained
     FROM pg_stat_user_tables t
     JOIN pg_class c ON c.oid = t.relid
     WHERE t.schemaname = ANY($1::text[])
@@ -284,6 +486,46 @@ pub const FIND_STALE_STATS: &str = r#"
       AND pg_table_size(t.relid) BETWEEN $4 AND $5
       AND t.n_mod_since_analyze > ($2::bigint + $3::float8 * COALESCE(t.n_live_tup, 0))
     ORDER BY t.n_mod_since_analyze DESC
+    LIMIT $6;
+"#;
+
+/// Same as FIND_STALE_STATS, ordered by table size descending (largest first).
+/// Parameters: same as FIND_STALE_STATS.
+pub const FIND_STALE_STATS_BY_SIZE: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1)          AS n_live_tup,
+        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze,
+        pg_table_size(t.relid)              AS size_bytes,
+        GREATEST(t.last_analyze, t.last_autoanalyze) AS last_maintained
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND c.relkind != 'p'
+      AND pg_table_size(t.relid) BETWEEN $4 AND $5
+      AND t.n_mod_since_analyze > ($2::bigint + $3::float8 * COALESCE(t.n_live_tup, 0))
+    ORDER BY size_bytes DESC
+    LIMIT $6;
+"#;
+
+/// Same as FIND_STALE_STATS, ordered by last-maintained ascending (oldest/never first).
+/// Parameters: same as FIND_STALE_STATS.
+pub const FIND_STALE_STATS_BY_LAST_MAINTAINED: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1)          AS n_live_tup,
+        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze,
+        pg_table_size(t.relid)              AS size_bytes,
+        GREATEST(t.last_analyze, t.last_autoanalyze) AS last_maintained
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND c.relkind != 'p'
+      AND pg_table_size(t.relid) BETWEEN $4 AND $5
+      AND t.n_mod_since_analyze > ($2::bigint + $3::float8 * COALESCE(t.n_live_tup, 0))
+    ORDER BY last_maintained ASC NULLS FIRST
     LIMIT $6;
 "#;
 
@@ -300,7 +542,9 @@ pub const FIND_STALE_STATS_TABLE: &str = r#"
         t.schemaname,
         t.relname AS tablename,
         COALESCE(t.n_live_tup, -1)          AS n_live_tup,
-        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze
+        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze,
+        pg_table_size(t.relid)              AS size_bytes,
+        GREATEST(t.last_analyze, t.last_autoanalyze) AS last_maintained
     FROM pg_stat_user_tables t
     JOIN pg_class c ON c.oid = t.relid
     WHERE t.schemaname = ANY($1::text[])
@@ -309,6 +553,116 @@ pub const FIND_STALE_STATS_TABLE: &str = r#"
       AND pg_table_size(t.relid) BETWEEN $5 AND $6
       AND t.n_mod_since_analyze > ($3::bigint + $4::float8 * COALESCE(t.n_live_tup, 0))
     ORDER BY t.n_mod_since_analyze DESC;
+"#;
+
+/// Tables whose most recent VACUUM (manual or auto) is older than the configured
+/// number of days. Never-vacuumed tables are excluded (GREATEST returns NULL when
+/// both inputs are NULL).
+///
+/// Ordered by age ascending (oldest first).
+/// Excludes partitioned parent tables (relkind = 'p').
+/// Parameters:
+///   $1 = array of schema names (text[])
+///   $2 = number of days (int)
+///   $3 = minimum table size in bytes (i64)
+///   $4 = maximum table size in bytes (i64)
+///   $5 = limit (i64, use i64::MAX for no limit)
+pub const FIND_VACUUM_OVERDUE: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1) AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1) AS n_dead_tup,
+        EXTRACT(EPOCH FROM now() - GREATEST(t.last_vacuum, t.last_autovacuum))::float8
+            / 86400.0 AS days_since_vacuum
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND c.relkind != 'p'
+      AND GREATEST(t.last_vacuum, t.last_autovacuum) < now() - make_interval(days => $2::int)
+      AND pg_table_size(t.relid) BETWEEN $3 AND $4
+    ORDER BY GREATEST(t.last_vacuum, t.last_autovacuum) ASC
+    LIMIT $5;
+"#;
+
+/// Same as FIND_VACUUM_OVERDUE but scoped to a single table.
+/// Parameters:
+///   $1 = array of schema names (text[])
+///   $2 = table name (text)
+///   $3 = number of days (int)
+///   $4 = minimum table size in bytes (i64)
+///   $5 = maximum table size in bytes (i64)
+pub const FIND_VACUUM_OVERDUE_TABLE: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1) AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1) AS n_dead_tup,
+        EXTRACT(EPOCH FROM now() - GREATEST(t.last_vacuum, t.last_autovacuum))::float8
+            / 86400.0 AS days_since_vacuum
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND t.relname = $2
+      AND c.relkind != 'p'
+      AND GREATEST(t.last_vacuum, t.last_autovacuum) < now() - make_interval(days => $3::int)
+      AND pg_table_size(t.relid) BETWEEN $4 AND $5
+    ORDER BY GREATEST(t.last_vacuum, t.last_autovacuum) ASC;
+"#;
+
+/// Tables whose most recent ANALYZE (manual or auto) is older than the configured
+/// number of days. Never-analyzed tables are excluded (GREATEST returns NULL when
+/// both inputs are NULL).
+///
+/// Ordered by age ascending (oldest first).
+/// Excludes partitioned parent tables (relkind = 'p').
+/// Parameters:
+///   $1 = array of schema names (text[])
+///   $2 = number of days (int)
+///   $3 = minimum table size in bytes (i64)
+///   $4 = maximum table size in bytes (i64)
+///   $5 = limit (i64, use i64::MAX for no limit)
+pub const FIND_ANALYZE_OVERDUE: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1)          AS n_live_tup,
+        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze,
+        EXTRACT(EPOCH FROM now() - GREATEST(t.last_analyze, t.last_autoanalyze))::float8
+            / 86400.0 AS days_since_analyze
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND c.relkind != 'p'
+      AND GREATEST(t.last_analyze, t.last_autoanalyze) < now() - make_interval(days => $2::int)
+      AND pg_table_size(t.relid) BETWEEN $3 AND $4
+    ORDER BY GREATEST(t.last_analyze, t.last_autoanalyze) ASC
+    LIMIT $5;
+"#;
+
+/// Same as FIND_ANALYZE_OVERDUE but scoped to a single table.
+/// Parameters:
+///   $1 = array of schema names (text[])
+///   $2 = table name (text)
+///   $3 = number of days (int)
+///   $4 = minimum table size in bytes (i64)
+///   $5 = maximum table size in bytes (i64)
+pub const FIND_ANALYZE_OVERDUE_TABLE: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1)          AS n_live_tup,
+        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze,
+        EXTRACT(EPOCH FROM now() - GREATEST(t.last_analyze, t.last_autoanalyze))::float8
+            / 86400.0 AS days_since_analyze
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND t.relname = $2
+      AND c.relkind != 'p'
+      AND GREATEST(t.last_analyze, t.last_autoanalyze) < now() - make_interval(days => $3::int)
+      AND pg_table_size(t.relid) BETWEEN $4 AND $5
+    ORDER BY GREATEST(t.last_analyze, t.last_autoanalyze) ASC;
 "#;
 
 /// Get the dead tuple count for a specific table.
