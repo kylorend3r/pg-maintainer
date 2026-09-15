@@ -198,6 +198,8 @@ pub enum Mode {
     Wraparound,
     Bloated,
     StaleStats,
+    VacuumOverdue,
+    AnalyzeOverdue,
 }
 
 impl std::fmt::Display for Mode {
@@ -208,6 +210,8 @@ impl std::fmt::Display for Mode {
             Mode::Wraparound => write!(f, "wraparound"),
             Mode::Bloated => write!(f, "bloated"),
             Mode::StaleStats => write!(f, "stale-stats"),
+            Mode::VacuumOverdue => write!(f, "vacuum-overdue"),
+            Mode::AnalyzeOverdue => write!(f, "analyze-overdue"),
         }
     }
 }
@@ -222,8 +226,10 @@ impl std::str::FromStr for Mode {
             "wraparound" => Ok(Mode::Wraparound),
             "bloated" => Ok(Mode::Bloated),
             "stale-stats" => Ok(Mode::StaleStats),
+            "vacuum-overdue" => Ok(Mode::VacuumOverdue),
+            "analyze-overdue" => Ok(Mode::AnalyzeOverdue),
             _ => Err(format!(
-                "Invalid mode '{s}'. Must be one of: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats"
+                "Invalid mode '{s}'. Must be one of: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats, vacuum-overdue, analyze-overdue"
             )),
         }
     }
@@ -269,6 +275,30 @@ impl StaleStatsTableInfo {
     pub fn effective_threshold(&self, analyze_threshold: i64, analyze_scale_factor: f64) -> i64 {
         analyze_threshold + (analyze_scale_factor * self.n_live_tup as f64).round() as i64
     }
+}
+
+/// A table whose most recent VACUUM (manual or auto) is older than the configured
+/// number of days.
+#[derive(Debug, Clone)]
+pub struct OverdueVacuumTableInfo {
+    pub schema_name: String,
+    pub table_name: String,
+    pub n_live_tup: i64,
+    pub n_dead_tup: i64,
+    /// Days since GREATEST(last_vacuum, last_autovacuum), fractional.
+    pub days_since_vacuum: f64,
+}
+
+/// A table whose most recent ANALYZE (manual or auto) is older than the configured
+/// number of days.
+#[derive(Debug, Clone)]
+pub struct OverdueAnalyzeTableInfo {
+    pub schema_name: String,
+    pub table_name: String,
+    pub n_live_tup: i64,
+    pub n_mod_since_analyze: i64,
+    /// Days since GREATEST(last_analyze, last_autoanalyze), fractional.
+    pub days_since_analyze: f64,
 }
 
 /// A table named explicitly on `--also-tables`, always schema-qualified.

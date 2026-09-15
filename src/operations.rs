@@ -361,6 +361,92 @@ pub async fn find_stale_stats_candidates(
         .collect())
 }
 
+/// Returns tables whose most recent VACUUM (manual or auto) is older than the
+/// configured number of days. Never-vacuumed tables are excluded.
+#[allow(clippy::too_many_arguments)]
+pub async fn find_vacuum_overdue_candidates(
+    client: &Client,
+    schemas: &[String],
+    table: Option<&str>,
+    older_than_days: i32,
+    min_bytes: i64,
+    max_bytes: i64,
+    limit: i64,
+) -> Result<Vec<crate::types::OverdueVacuumTableInfo>> {
+    let schemas_vec: Vec<String> = schemas.to_vec();
+    let rows = if let Some(tbl) = table {
+        client
+            .query(
+                queries::FIND_VACUUM_OVERDUE_TABLE,
+                &[&schemas_vec, &tbl, &older_than_days, &min_bytes, &max_bytes],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to query vacuum-overdue candidates: {e}"))?
+    } else {
+        client
+            .query(
+                queries::FIND_VACUUM_OVERDUE,
+                &[&schemas_vec, &older_than_days, &min_bytes, &max_bytes, &limit],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to query vacuum-overdue candidates: {e}"))?
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(|row| crate::types::OverdueVacuumTableInfo {
+            schema_name: row.get("schemaname"),
+            table_name: row.get("tablename"),
+            n_live_tup: row.get("n_live_tup"),
+            n_dead_tup: row.get("n_dead_tup"),
+            days_since_vacuum: row.get("days_since_vacuum"),
+        })
+        .collect())
+}
+
+/// Returns tables whose most recent ANALYZE (manual or auto) is older than the
+/// configured number of days. Never-analyzed tables are excluded.
+#[allow(clippy::too_many_arguments)]
+pub async fn find_analyze_overdue_candidates(
+    client: &Client,
+    schemas: &[String],
+    table: Option<&str>,
+    older_than_days: i32,
+    min_bytes: i64,
+    max_bytes: i64,
+    limit: i64,
+) -> Result<Vec<crate::types::OverdueAnalyzeTableInfo>> {
+    let schemas_vec: Vec<String> = schemas.to_vec();
+    let rows = if let Some(tbl) = table {
+        client
+            .query(
+                queries::FIND_ANALYZE_OVERDUE_TABLE,
+                &[&schemas_vec, &tbl, &older_than_days, &min_bytes, &max_bytes],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to query analyze-overdue candidates: {e}"))?
+    } else {
+        client
+            .query(
+                queries::FIND_ANALYZE_OVERDUE,
+                &[&schemas_vec, &older_than_days, &min_bytes, &max_bytes, &limit],
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to query analyze-overdue candidates: {e}"))?
+    };
+
+    Ok(rows
+        .into_iter()
+        .map(|row| crate::types::OverdueAnalyzeTableInfo {
+            schema_name: row.get("schemaname"),
+            table_name: row.get("tablename"),
+            n_live_tup: row.get("n_live_tup"),
+            n_mod_since_analyze: row.get("n_mod_since_analyze"),
+            days_since_analyze: row.get("days_since_analyze"),
+        })
+        .collect())
+}
+
 // ─── Active vacuum detection ──────────────────────────────────────────────────
 
 /// Returns the PIDs of any VACUUM or autovacuum workers currently running on
@@ -643,6 +729,8 @@ const OP_VACUUM: &str = "VACUUM";
 const OP_ANALYZE: &str = "ANALYZE";
 const OP_FREEZE: &str = "VACUUM FREEZE";
 const OP_BLOAT: &str = "VACUUM (BLOAT)";
+const OP_VACUUM_OVERDUE: &str = "VACUUM (OVERDUE)";
+const OP_ANALYZE_OVERDUE: &str = "ANALYZE (OVERDUE)";
 const BACKEND_TYPE_AUTOVACUUM_WORKER: &str = "autovacuum worker";
 
 /// Vacuum all tables that have never been vacuumed.
@@ -1526,6 +1614,351 @@ pub async fn run_stale_stats_analyze(
                             table: &t.table_name,
                             operation: "ANALYZE",
                             mode: "stale-stats",
+                            status: "error",
+                            dead_tuples_before: None,
+                            dead_tuples_removed: None,
+                            duration_ms,
+                            error_message: Some(&e.to_string()),
+                        },
+                    )
+                    .await;
+                    summary.failed += 1;
+                }
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Run VACUUM on all tables overdue for vacuuming (not vacuumed in N days).
+/// Tables already vacuumed by earlier phases are skipped (tracked in `already_vacuumed`).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_vacuum_overdue(
+    client: &Client,
+    tables: &[crate::types::OverdueVacuumTableInfo],
+    policy: RunPolicy,
+    already_vacuumed: &std::collections::HashSet<(String, String)>,
+    logger: &Arc<Logger>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    vacuum_opts: VacuumOptions,
+    lag_gate: Option<&ReplicaLagGate>,
+) -> Result<OperationSummary> {
+    let mut summary = OperationSummary {
+        total: tables.len(),
+        ..Default::default()
+    };
+
+    if tables.is_empty() {
+        logger.log(LogLevel::Success, "No tables overdue for VACUUM.");
+        return Ok(summary);
+    }
+
+    logger.log(
+        LogLevel::Info,
+        &format!("Found {} table(s) overdue for VACUUM.", tables.len()),
+    );
+
+    for (i, t) in tables.iter().enumerate() {
+        if *shutdown_rx.borrow() {
+            logger.log(
+                LogLevel::Warning,
+                "Shutdown signal received — stopping after current table.",
+            );
+            break;
+        }
+
+        if already_vacuumed.contains(&(t.schema_name.clone(), t.table_name.clone())) {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "Skipping \"{}\".\"{}\" — already vacuumed by an earlier phase",
+                    t.schema_name, t.table_name
+                ),
+            );
+            summary.skipped += 1;
+            continue;
+        }
+
+        if let Some(gate) = lag_gate {
+            match wait_for_replica_lag(
+                client,
+                gate,
+                &t.schema_name,
+                &t.table_name,
+                policy,
+                logger,
+                shutdown_rx,
+            )
+            .await?
+            {
+                LagGateVerdict::Proceed => {}
+                LagGateVerdict::SkipTable => {
+                    summary.skipped += 1;
+                    continue;
+                }
+                LagGateVerdict::ShutdownRequested => break,
+            }
+        }
+
+        let proceed = handle_active_vacuums(
+            client,
+            &t.schema_name,
+            &t.table_name,
+            policy,
+            logger,
+            &mut summary,
+        )
+        .await?;
+
+        if !proceed {
+            continue;
+        }
+
+        if policy.dry_run {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "[DRY RUN] Would run: VACUUM \"{}\".\"{}\"  (last vacuumed {:.1} days ago, live={}, dead={})",
+                    t.schema_name, t.table_name, t.days_since_vacuum, t.n_live_tup, t.n_dead_tup
+                ),
+            );
+            continue;
+        }
+
+        logger.log_table_start(
+            i + 1,
+            tables.len(),
+            &t.schema_name,
+            &t.table_name,
+            OP_VACUUM_OVERDUE,
+        );
+        let start = Instant::now();
+        match vacuum_table(client, &t.schema_name, &t.table_name, vacuum_opts).await {
+            Ok(result) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
+                logger.log_table_success(
+                    &t.schema_name,
+                    &t.table_name,
+                    OP_VACUUM_OVERDUE,
+                    start.elapsed(),
+                );
+                log_maintenance_operation(
+                    client,
+                    policy.dry_run,
+                    LogEntry {
+                        schema: &t.schema_name,
+                        table: &t.table_name,
+                        operation: "VACUUM",
+                        mode: "vacuum-overdue",
+                        status: "success",
+                        dead_tuples_before: result.dead_tuples_before,
+                        dead_tuples_removed: result.dead_tuples_removed,
+                        duration_ms,
+                        error_message: None,
+                    },
+                )
+                .await;
+                summary.succeeded += 1;
+            }
+            Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
+                if is_lock_timeout(&e) {
+                    logger.log(
+                        LogLevel::Warning,
+                        &format!(
+                            "Skipping \"{}\".\"{}\" — could not acquire lock within 10ms",
+                            t.schema_name, t.table_name
+                        ),
+                    );
+                    summary.skipped += 1;
+                } else {
+                    logger.log_table_failed(
+                        &t.schema_name,
+                        &t.table_name,
+                        OP_VACUUM_OVERDUE,
+                        &e.to_string(),
+                    );
+                    log_maintenance_operation(
+                        client,
+                        policy.dry_run,
+                        LogEntry {
+                            schema: &t.schema_name,
+                            table: &t.table_name,
+                            operation: "VACUUM",
+                            mode: "vacuum-overdue",
+                            status: "error",
+                            dead_tuples_before: None,
+                            dead_tuples_removed: None,
+                            duration_ms,
+                            error_message: Some(&e.to_string()),
+                        },
+                    )
+                    .await;
+                    summary.failed += 1;
+                }
+            }
+        }
+    }
+
+    Ok(summary)
+}
+
+/// Run ANALYZE on all tables overdue for analysis (not analyzed in N days).
+/// Tables already analyzed by earlier phases are skipped (tracked in `already_analyzed`).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_analyze_overdue(
+    client: &Client,
+    tables: &[crate::types::OverdueAnalyzeTableInfo],
+    policy: RunPolicy,
+    already_analyzed: &std::collections::HashSet<(String, String)>,
+    logger: &Arc<Logger>,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    lag_gate: Option<&ReplicaLagGate>,
+) -> Result<OperationSummary> {
+    let mut summary = OperationSummary {
+        total: tables.len(),
+        ..Default::default()
+    };
+
+    if tables.is_empty() {
+        logger.log(LogLevel::Success, "No tables overdue for ANALYZE.");
+        return Ok(summary);
+    }
+
+    logger.log(
+        LogLevel::Info,
+        &format!("Found {} table(s) overdue for ANALYZE.", tables.len()),
+    );
+
+    for (i, t) in tables.iter().enumerate() {
+        if *shutdown_rx.borrow() {
+            logger.log(
+                LogLevel::Warning,
+                "Shutdown signal received — stopping after current table.",
+            );
+            break;
+        }
+
+        if already_analyzed.contains(&(t.schema_name.clone(), t.table_name.clone())) {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "Skipping \"{}\".\"{}\" — already analyzed by an earlier phase",
+                    t.schema_name, t.table_name
+                ),
+            );
+            summary.skipped += 1;
+            continue;
+        }
+
+        if let Some(gate) = lag_gate {
+            match wait_for_replica_lag(
+                client,
+                gate,
+                &t.schema_name,
+                &t.table_name,
+                policy,
+                logger,
+                shutdown_rx,
+            )
+            .await?
+            {
+                LagGateVerdict::Proceed => {}
+                LagGateVerdict::SkipTable => {
+                    summary.skipped += 1;
+                    continue;
+                }
+                LagGateVerdict::ShutdownRequested => break,
+            }
+        }
+
+        let proceed = handle_active_vacuums(
+            client,
+            &t.schema_name,
+            &t.table_name,
+            policy,
+            logger,
+            &mut summary,
+        )
+        .await?;
+
+        if !proceed {
+            continue;
+        }
+
+        if policy.dry_run {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "[DRY RUN] Would run: ANALYZE \"{}\".\"{}\"  (last analyzed {:.1} days ago, mods={})",
+                    t.schema_name, t.table_name, t.days_since_analyze, t.n_mod_since_analyze
+                ),
+            );
+            continue;
+        }
+
+        logger.log_table_start(
+            i + 1,
+            tables.len(),
+            &t.schema_name,
+            &t.table_name,
+            OP_ANALYZE_OVERDUE,
+        );
+        let start = Instant::now();
+        match analyze_table(client, &t.schema_name, &t.table_name).await {
+            Ok(result) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
+                logger.log_table_success(
+                    &t.schema_name,
+                    &t.table_name,
+                    OP_ANALYZE_OVERDUE,
+                    start.elapsed(),
+                );
+                log_maintenance_operation(
+                    client,
+                    policy.dry_run,
+                    LogEntry {
+                        schema: &t.schema_name,
+                        table: &t.table_name,
+                        operation: "ANALYZE",
+                        mode: "analyze-overdue",
+                        status: "success",
+                        dead_tuples_before: result.dead_tuples_before,
+                        dead_tuples_removed: result.dead_tuples_removed,
+                        duration_ms,
+                        error_message: None,
+                    },
+                )
+                .await;
+                summary.succeeded += 1;
+            }
+            Err(e) => {
+                let duration_ms = start.elapsed().as_millis() as i64;
+                if is_lock_timeout(&e) {
+                    logger.log(
+                        LogLevel::Warning,
+                        &format!(
+                            "Skipping \"{}\".\"{}\" — could not acquire lock within 10ms",
+                            t.schema_name, t.table_name
+                        ),
+                    );
+                    summary.skipped += 1;
+                } else {
+                    logger.log_table_failed(
+                        &t.schema_name,
+                        &t.table_name,
+                        OP_ANALYZE_OVERDUE,
+                        &e.to_string(),
+                    );
+                    log_maintenance_operation(
+                        client,
+                        policy.dry_run,
+                        LogEntry {
+                            schema: &t.schema_name,
+                            table: &t.table_name,
+                            operation: "ANALYZE",
+                            mode: "analyze-overdue",
                             status: "error",
                             dead_tuples_before: None,
                             dead_tuples_removed: None,

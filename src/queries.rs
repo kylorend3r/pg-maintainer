@@ -311,6 +311,116 @@ pub const FIND_STALE_STATS_TABLE: &str = r#"
     ORDER BY t.n_mod_since_analyze DESC;
 "#;
 
+/// Tables whose most recent VACUUM (manual or auto) is older than the configured
+/// number of days. Never-vacuumed tables are excluded (GREATEST returns NULL when
+/// both inputs are NULL).
+///
+/// Ordered by age ascending (oldest first).
+/// Excludes partitioned parent tables (relkind = 'p').
+/// Parameters:
+///   $1 = array of schema names (text[])
+///   $2 = number of days (int)
+///   $3 = minimum table size in bytes (i64)
+///   $4 = maximum table size in bytes (i64)
+///   $5 = limit (i64, use i64::MAX for no limit)
+pub const FIND_VACUUM_OVERDUE: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1) AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1) AS n_dead_tup,
+        EXTRACT(EPOCH FROM now() - GREATEST(t.last_vacuum, t.last_autovacuum))::float8
+            / 86400.0 AS days_since_vacuum
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND c.relkind != 'p'
+      AND GREATEST(t.last_vacuum, t.last_autovacuum) < now() - make_interval(days => $2::int)
+      AND pg_table_size(t.relid) BETWEEN $3 AND $4
+    ORDER BY GREATEST(t.last_vacuum, t.last_autovacuum) ASC
+    LIMIT $5;
+"#;
+
+/// Same as FIND_VACUUM_OVERDUE but scoped to a single table.
+/// Parameters:
+///   $1 = array of schema names (text[])
+///   $2 = table name (text)
+///   $3 = number of days (int)
+///   $4 = minimum table size in bytes (i64)
+///   $5 = maximum table size in bytes (i64)
+pub const FIND_VACUUM_OVERDUE_TABLE: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1) AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1) AS n_dead_tup,
+        EXTRACT(EPOCH FROM now() - GREATEST(t.last_vacuum, t.last_autovacuum))::float8
+            / 86400.0 AS days_since_vacuum
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND t.relname = $2
+      AND c.relkind != 'p'
+      AND GREATEST(t.last_vacuum, t.last_autovacuum) < now() - make_interval(days => $3::int)
+      AND pg_table_size(t.relid) BETWEEN $4 AND $5
+    ORDER BY GREATEST(t.last_vacuum, t.last_autovacuum) ASC;
+"#;
+
+/// Tables whose most recent ANALYZE (manual or auto) is older than the configured
+/// number of days. Never-analyzed tables are excluded (GREATEST returns NULL when
+/// both inputs are NULL).
+///
+/// Ordered by age ascending (oldest first).
+/// Excludes partitioned parent tables (relkind = 'p').
+/// Parameters:
+///   $1 = array of schema names (text[])
+///   $2 = number of days (int)
+///   $3 = minimum table size in bytes (i64)
+///   $4 = maximum table size in bytes (i64)
+///   $5 = limit (i64, use i64::MAX for no limit)
+pub const FIND_ANALYZE_OVERDUE: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1)          AS n_live_tup,
+        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze,
+        EXTRACT(EPOCH FROM now() - GREATEST(t.last_analyze, t.last_autoanalyze))::float8
+            / 86400.0 AS days_since_analyze
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND c.relkind != 'p'
+      AND GREATEST(t.last_analyze, t.last_autoanalyze) < now() - make_interval(days => $2::int)
+      AND pg_table_size(t.relid) BETWEEN $3 AND $4
+    ORDER BY GREATEST(t.last_analyze, t.last_autoanalyze) ASC
+    LIMIT $5;
+"#;
+
+/// Same as FIND_ANALYZE_OVERDUE but scoped to a single table.
+/// Parameters:
+///   $1 = array of schema names (text[])
+///   $2 = table name (text)
+///   $3 = number of days (int)
+///   $4 = minimum table size in bytes (i64)
+///   $5 = maximum table size in bytes (i64)
+pub const FIND_ANALYZE_OVERDUE_TABLE: &str = r#"
+    SELECT
+        t.schemaname,
+        t.relname AS tablename,
+        COALESCE(t.n_live_tup, -1)          AS n_live_tup,
+        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze,
+        EXTRACT(EPOCH FROM now() - GREATEST(t.last_analyze, t.last_autoanalyze))::float8
+            / 86400.0 AS days_since_analyze
+    FROM pg_stat_user_tables t
+    JOIN pg_class c ON c.oid = t.relid
+    WHERE t.schemaname = ANY($1::text[])
+      AND t.relname = $2
+      AND c.relkind != 'p'
+      AND GREATEST(t.last_analyze, t.last_autoanalyze) < now() - make_interval(days => $3::int)
+      AND pg_table_size(t.relid) BETWEEN $4 AND $5
+    ORDER BY GREATEST(t.last_analyze, t.last_autoanalyze) ASC;
+"#;
+
 /// Get the dead tuple count for a specific table.
 /// Parameters:
 ///   $1 = schema name (text)

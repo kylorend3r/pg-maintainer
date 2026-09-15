@@ -79,12 +79,13 @@ struct Args {
     dry_run: bool,
 
     // ── Mode selection ───────────────────────────────────────────────────────
-    /// Comma-separated modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats.
-    /// Defaults to all five when omitted.
+    /// Comma-separated modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats,
+    /// vacuum-overdue, analyze-overdue.
+    /// Defaults to the first five when omitted.
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats"
+        help = "Modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats, vacuum-overdue, analyze-overdue"
     )]
     mode: Option<Vec<String>>,
 
@@ -100,6 +101,23 @@ struct Args {
     /// Cap each mode to its top N candidate tables (default: no limit).
     #[arg(long, help = "Limit each mode to top N tables (default: unlimited)")]
     limit: Option<i64>,
+
+    // ── Overdue maintenance (opt-in) ──────────────────────────────────────────
+    /// VACUUM tables not vacuumed (manual or auto) in this many days. Opt-in: requires --mode includes vacuum-overdue.
+    #[arg(
+        long,
+        value_name = "DAYS",
+        help = "vacuum-overdue mode: VACUUM tables not vacuumed in this many days"
+    )]
+    vacuum_older_than_days: Option<i64>,
+
+    /// ANALYZE tables not analyzed (manual or auto) in this many days. Opt-in: requires --mode includes analyze-overdue.
+    #[arg(
+        long,
+        value_name = "DAYS",
+        help = "analyze-overdue mode: ANALYZE tables not analyzed in this many days"
+    )]
+    analyze_older_than_days: Option<i64>,
 
     // ── Bloat tuning ─────────────────────────────────────────────────────────
     /// Bloat threshold percentage (default: 80.0). Tables with dead tuple ratio
@@ -308,6 +326,8 @@ struct Config {
     force: Option<bool>,
     skip_active_vacuum: Option<bool>,
     limit: Option<i64>,
+    vacuum_older_than_days: Option<i64>,
+    analyze_older_than_days: Option<i64>,
     bloat_threshold_pct: Option<f64>,
     analyze_threshold: Option<i64>,
     analyze_scale_factor: Option<f64>,
@@ -404,6 +424,12 @@ fn merge_config(file: Config, mut args: Args) -> Args {
     }
     if args.limit.is_none() {
         args.limit = file.limit;
+    }
+    if args.vacuum_older_than_days.is_none() {
+        args.vacuum_older_than_days = file.vacuum_older_than_days;
+    }
+    if args.analyze_older_than_days.is_none() {
+        args.analyze_older_than_days = file.analyze_older_than_days;
     }
 
     if args.bloat_threshold_pct == DEFAULT_BLOAT_THRESHOLD_PCT
@@ -657,6 +683,36 @@ async fn main() -> Result<()> {
         .collect()
     };
 
+    // Validate overdue maintenance modes and flags
+    if enabled_modes.contains(&Mode::VacuumOverdue) {
+        if args.vacuum_older_than_days.is_none() {
+            return Err(anyhow::anyhow!(
+                "--mode vacuum-overdue requires --vacuum-older-than-days"
+            ));
+        }
+        if let Some(days) = args.vacuum_older_than_days
+            && (days < 1 || days > i32::MAX as i64)
+        {
+            return Err(anyhow::anyhow!(
+                "--vacuum-older-than-days ({days}) must be >= 1"
+            ));
+        }
+    }
+    if enabled_modes.contains(&Mode::AnalyzeOverdue) {
+        if args.analyze_older_than_days.is_none() {
+            return Err(anyhow::anyhow!(
+                "--mode analyze-overdue requires --analyze-older-than-days"
+            ));
+        }
+        if let Some(days) = args.analyze_older_than_days
+            && (days < 1 || days > i32::MAX as i64)
+        {
+            return Err(anyhow::anyhow!(
+                "--analyze-older-than-days ({days}) must be >= 1"
+            ));
+        }
+    }
+
     // Validate --limit
     if let Some(limit) = args.limit
         && limit <= 0
@@ -767,6 +823,20 @@ async fn main() -> Result<()> {
         println!(
             "Starting pg-maintainer (silence mode — logs: {})",
             args.log_file
+        );
+    }
+
+    // Warn if overdue flags are given but modes are not enabled
+    if !enabled_modes.contains(&Mode::VacuumOverdue) && args.vacuum_older_than_days.is_some() {
+        logger.log(
+            LogLevel::Warning,
+            "Warning: --vacuum-older-than-days is ignored unless --mode includes vacuum-overdue",
+        );
+    }
+    if !enabled_modes.contains(&Mode::AnalyzeOverdue) && args.analyze_older_than_days.is_some() {
+        logger.log(
+            LogLevel::Warning,
+            "Warning: --analyze-older-than-days is ignored unless --mode includes analyze-overdue",
         );
     }
 
@@ -1092,6 +1162,8 @@ async fn main() -> Result<()> {
     };
 
     let mut already_handled: HashSet<(String, String)> = HashSet::new();
+    let mut already_vacuumed: HashSet<(String, String)> = HashSet::new();
+    let mut already_analyzed: HashSet<(String, String)> = HashSet::new();
 
     // ── Phase 1: VACUUM never-vacuumed tables ─────────────────────────────────
     let vacuum_summary = if enabled_modes.contains(&Mode::NeverVacuumed) {
@@ -1112,6 +1184,7 @@ async fn main() -> Result<()> {
         .context("Failed to query never-vacuumed tables")?;
         for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
+            already_vacuumed.insert((t.schema_name.clone(), t.table_name.clone()));
         }
         operations::run_vacuum_never_vacuumed(
             &client,
@@ -1148,6 +1221,7 @@ async fn main() -> Result<()> {
         .context("Failed to query never-analyzed tables")?;
         for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
+            already_analyzed.insert((t.schema_name.clone(), t.table_name.clone()));
         }
         operations::run_analyze_never_analyzed(
             &client,
@@ -1185,6 +1259,7 @@ async fn main() -> Result<()> {
         .context("Failed to query wraparound candidates")?;
         for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
+            already_vacuumed.insert((t.schema_name.clone(), t.table_name.clone()));
         }
         operations::run_freeze_wraparound(
             &client,
@@ -1241,6 +1316,7 @@ async fn main() -> Result<()> {
         .context("VACUUM BLOAT phase failed")?;
         for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
+            already_vacuumed.insert((t.schema_name.clone(), t.table_name.clone()));
         }
         summary
     } else {
@@ -1324,6 +1400,7 @@ async fn main() -> Result<()> {
         .context("ANALYZE STALE STATS phase failed")?;
         for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
+            already_analyzed.insert((t.schema_name.clone(), t.table_name.clone()));
         }
         summary
     } else {
@@ -1334,13 +1411,108 @@ async fn main() -> Result<()> {
         Default::default()
     };
 
-    // ── Phase 6: VACUUM (ANALYZE) explicitly listed tables ───────────────────
+    // ── Phase 6: VACUUM overdue candidates ────────────────────────────────────
+    let vacuum_overdue_summary = if enabled_modes.contains(&Mode::VacuumOverdue) {
+        let older_than_days = args.vacuum_older_than_days.unwrap() as i32;
+        logger.log(
+            LogLevel::Info,
+            &format!(
+                "═══ Phase 6: VACUUM (not vacuumed in {older_than_days} days) ═══"
+            ),
+        );
+        logger.log(
+            LogLevel::Info,
+            &format!("Searching for tables not vacuumed in {older_than_days} days..."),
+        );
+        let candidates = operations::find_vacuum_overdue_candidates(
+            &client,
+            &schemas,
+            table_filter,
+            older_than_days,
+            min_bytes,
+            max_bytes,
+            limit_n,
+        )
+        .await
+        .context("Failed to query vacuum-overdue candidates")?;
+        let summary = operations::run_vacuum_overdue(
+            &client,
+            &candidates,
+            run_policy,
+            &already_vacuumed,
+            &logger,
+            &mut shutdown_rx,
+            vacuum_opts,
+            lag_gate.as_deref(),
+        )
+        .await
+        .context("VACUUM OVERDUE phase failed")?;
+        for t in &candidates {
+            already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
+        }
+        summary
+    } else {
+        logger.log(
+            LogLevel::Info,
+            "Skipping Phase 6: VACUUM (overdue) (not in --mode)",
+        );
+        Default::default()
+    };
+
+    // ── Phase 7: ANALYZE overdue candidates ───────────────────────────────────
+    let analyze_overdue_summary = if enabled_modes.contains(&Mode::AnalyzeOverdue) {
+        let older_than_days = args.analyze_older_than_days.unwrap() as i32;
+        logger.log(
+            LogLevel::Info,
+            &format!(
+                "═══ Phase 7: ANALYZE (not analyzed in {older_than_days} days) ═══"
+            ),
+        );
+        logger.log(
+            LogLevel::Info,
+            &format!("Searching for tables not analyzed in {older_than_days} days..."),
+        );
+        let candidates = operations::find_analyze_overdue_candidates(
+            &client,
+            &schemas,
+            table_filter,
+            older_than_days,
+            min_bytes,
+            max_bytes,
+            limit_n,
+        )
+        .await
+        .context("Failed to query analyze-overdue candidates")?;
+        let summary = operations::run_analyze_overdue(
+            &client,
+            &candidates,
+            run_policy,
+            &already_analyzed,
+            &logger,
+            &mut shutdown_rx,
+            lag_gate.as_deref(),
+        )
+        .await
+        .context("ANALYZE OVERDUE phase failed")?;
+        for t in &candidates {
+            already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
+        }
+        summary
+    } else {
+        logger.log(
+            LogLevel::Info,
+            "Skipping Phase 7: ANALYZE (overdue) (not in --mode)",
+        );
+        Default::default()
+    };
+
+    // ── Phase 8: VACUUM (ANALYZE) explicitly listed tables ───────────────────
     // Runs after whichever modes were selected, in addition to them — it is not a
     // --mode value.
     let also_tables_summary = if !also_tables.is_empty() {
         logger.log(
             LogLevel::Info,
-            "═══ Phase 6: VACUUM (ANALYZE) (--also-tables) ═══",
+            "═══ Phase 8: VACUUM (ANALYZE) (--also-tables) ═══",
         );
         operations::run_also_tables(
             &client,
@@ -1365,18 +1537,24 @@ async fn main() -> Result<()> {
         + freeze_summary.total
         + bloat_summary.total
         + stale_stats_summary.total
+        + vacuum_overdue_summary.total
+        + analyze_overdue_summary.total
         + also_tables_summary.total;
     let total_ok = vacuum_summary.succeeded
         + analyze_summary.succeeded
         + freeze_summary.succeeded
         + bloat_summary.succeeded
         + stale_stats_summary.succeeded
+        + vacuum_overdue_summary.succeeded
+        + analyze_overdue_summary.succeeded
         + also_tables_summary.succeeded;
     let total_fail = vacuum_summary.failed
         + analyze_summary.failed
         + freeze_summary.failed
         + bloat_summary.failed
         + stale_stats_summary.failed
+        + vacuum_overdue_summary.failed
+        + analyze_overdue_summary.failed
         + also_tables_summary.failed;
 
     logger.log_always(
@@ -1444,6 +1622,30 @@ async fn main() -> Result<()> {
                 stale_stats_summary.succeeded,
                 stale_stats_summary.failed,
                 stale_stats_summary.skipped
+            ),
+        );
+    }
+    if enabled_modes.contains(&Mode::VacuumOverdue) {
+        logger.log_always(
+            LogLevel::Info,
+            &format!(
+                "  VACUUM (overdue)  — total: {}, ok: {}, failed: {}, skipped: {}",
+                vacuum_overdue_summary.total,
+                vacuum_overdue_summary.succeeded,
+                vacuum_overdue_summary.failed,
+                vacuum_overdue_summary.skipped
+            ),
+        );
+    }
+    if enabled_modes.contains(&Mode::AnalyzeOverdue) {
+        logger.log_always(
+            LogLevel::Info,
+            &format!(
+                "  ANALYZE (overdue) — total: {}, ok: {}, failed: {}, skipped: {}",
+                analyze_overdue_summary.total,
+                analyze_overdue_summary.succeeded,
+                analyze_overdue_summary.failed,
+                analyze_overdue_summary.skipped
             ),
         );
     }
