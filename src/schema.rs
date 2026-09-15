@@ -10,7 +10,6 @@ const CREATE_SCHEMA_SQL: &str = "CREATE SCHEMA maintainer_logbook";
 const CREATE_LOGBOOK_TABLE_SQL: &str = r#"
     CREATE TABLE IF NOT EXISTS maintainer_logbook.maintenance_logbook (
         id                 BIGSERIAL PRIMARY KEY,
-        run_started_at     TIMESTAMPTZ NOT NULL,
         schema_name        VARCHAR(255) NOT NULL,
         table_name         VARCHAR(255) NOT NULL,
         operation          VARCHAR(32)  NOT NULL,
@@ -20,7 +19,8 @@ const CREATE_LOGBOOK_TABLE_SQL: &str = r#"
         dead_tuples_removed BIGINT,
         duration_ms        BIGINT,
         error_message      TEXT,
-        logged_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+        logged_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+        run_started_at     TIMESTAMPTZ NOT NULL
     )
 "#;
 

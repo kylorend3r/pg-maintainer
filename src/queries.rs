@@ -688,10 +688,10 @@ pub const GET_DEAD_TUPLE_COUNT: &str = r#"
 ///   $9 = error_message (text, nullable)
 pub const INSERT_MAINTENANCE_LOG: &str = r#"
     INSERT INTO maintainer_logbook.maintenance_logbook
-      (run_started_at, schema_name, table_name, operation, mode, status,
-       dead_tuples_before, dead_tuples_removed, duration_ms, error_message)
+      (schema_name, table_name, operation, mode, status,
+       dead_tuples_before, dead_tuples_removed, duration_ms, error_message, run_started_at)
     VALUES
-      (now(), $1, $2, $3, $4, $5, $6, $7, $8, $9)
+      ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
 "#;
 
 /// Every standby currently streaming from this primary, with its replay lag.
