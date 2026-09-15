@@ -386,7 +386,13 @@ pub async fn find_vacuum_overdue_candidates(
         client
             .query(
                 queries::FIND_VACUUM_OVERDUE,
-                &[&schemas_vec, &older_than_days, &min_bytes, &max_bytes, &limit],
+                &[
+                    &schemas_vec,
+                    &older_than_days,
+                    &min_bytes,
+                    &max_bytes,
+                    &limit,
+                ],
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query vacuum-overdue candidates: {e}"))?
@@ -429,7 +435,13 @@ pub async fn find_analyze_overdue_candidates(
         client
             .query(
                 queries::FIND_ANALYZE_OVERDUE,
-                &[&schemas_vec, &older_than_days, &min_bytes, &max_bytes, &limit],
+                &[
+                    &schemas_vec,
+                    &older_than_days,
+                    &min_bytes,
+                    &max_bytes,
+                    &limit,
+                ],
             )
             .await
             .map_err(|e| anyhow::anyhow!("Failed to query analyze-overdue candidates: {e}"))?

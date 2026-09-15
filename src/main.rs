@@ -1416,9 +1416,7 @@ async fn main() -> Result<()> {
         let older_than_days = args.vacuum_older_than_days.unwrap() as i32;
         logger.log(
             LogLevel::Info,
-            &format!(
-                "═══ Phase 6: VACUUM (not vacuumed in {older_than_days} days) ═══"
-            ),
+            &format!("═══ Phase 6: VACUUM (not vacuumed in {older_than_days} days) ═══"),
         );
         logger.log(
             LogLevel::Info,
@@ -1464,9 +1462,7 @@ async fn main() -> Result<()> {
         let older_than_days = args.analyze_older_than_days.unwrap() as i32;
         logger.log(
             LogLevel::Info,
-            &format!(
-                "═══ Phase 7: ANALYZE (not analyzed in {older_than_days} days) ═══"
-            ),
+            &format!("═══ Phase 7: ANALYZE (not analyzed in {older_than_days} days) ═══"),
         );
         logger.log(
             LogLevel::Info,
