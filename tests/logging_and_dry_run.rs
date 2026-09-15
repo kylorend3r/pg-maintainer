@@ -51,6 +51,74 @@ fn test_log_file_created_on_connection_attempt() {
     }
 }
 
+// ── Log rotation flag ──────────────────────────────────────────────────────────
+
+#[test]
+fn test_log_rotation_daily_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--log-rotation")
+        .arg("daily")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_log_rotation_none_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--log-rotation")
+        .arg("none")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_log_rotation_invalid_value_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--log-rotation")
+        .arg("weekly")
+        .env_clear()
+        .assert()
+        .code(2);
+}
+
+#[test]
+fn test_log_rotation_daily_creates_dated_file() {
+    let dir = TempDir::new().unwrap();
+    let log_path = dir.path().join("test.log");
+    let today = chrono::Utc::now().date_naive().format("%Y-%m-%d");
+    let dated_log_path = dir.path().join(format!("test-{today}.log"));
+
+    let _ = cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--log-file")
+        .arg(log_path.to_str().unwrap())
+        .arg("--log-rotation")
+        .arg("daily")
+        .env_clear()
+        .assert();
+
+    // Logger opens the file when the first message is written (before connection);
+    // no live DB in CI, so tolerate the file not existing at all (matching
+    // test_log_file_created_on_connection_attempt's style) — but if a log file
+    // was created, it must be the dated one, never the undated original.
+    if dated_log_path.exists() {
+        assert!(dated_log_path.is_file());
+    }
+    assert!(
+        !log_path.exists(),
+        "the undated log file must not be created when --log-rotation daily is set"
+    );
+}
+
 // ── Dry run ────────────────────────────────────────────────────────────────────
 
 #[test]

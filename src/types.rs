@@ -190,6 +190,37 @@ impl std::str::FromStr for LogFormat {
     }
 }
 
+/// Log file rotation strategy
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogRotation {
+    #[default]
+    None,
+    Daily,
+}
+
+impl std::fmt::Display for LogRotation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogRotation::None => write!(f, "none"),
+            LogRotation::Daily => write!(f, "daily"),
+        }
+    }
+}
+
+impl std::str::FromStr for LogRotation {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "none" => Ok(LogRotation::None),
+            "daily" => Ok(LogRotation::Daily),
+            _ => Err(format!(
+                "Invalid log rotation '{s}'. Must be one of: 'none', 'daily'"
+            )),
+        }
+    }
+}
+
 /// Per-operation result counters
 #[derive(Debug, Default)]
 pub struct OperationSummary {
