@@ -332,6 +332,10 @@ pub const GET_FREEZE_MAX_AGE: &str = "SELECT current_setting('autovacuum_freeze_
 /// Used by connection::connect() to enforce the PostgreSQL 14 minimum.
 pub const GET_SERVER_VERSION_NUM: &str = "SELECT current_setting('server_version_num')::int";
 
+/// True if the server is in recovery (standby), false for primary.
+/// Used by connection::connect() to refuse connections to standbys.
+pub const GET_IS_IN_RECOVERY: &str = "SELECT pg_is_in_recovery()";
+
 /// The server's autovacuum_analyze_threshold and autovacuum_analyze_scale_factor
 /// settings. Used as the default stale-stats thresholds unless overridden by
 /// --analyze-threshold / --analyze-scale-factor.
