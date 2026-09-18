@@ -4,6 +4,7 @@ pub struct VacuumOptions {
     pub truncate: bool,
     pub disable_page_skipping: bool,
     pub skip_locked: bool,
+    pub index_cleanup: Option<bool>,
 }
 
 /// Shared run-level policy flags threaded through every maintenance phase.
