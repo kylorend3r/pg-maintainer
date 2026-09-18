@@ -1100,6 +1100,40 @@ fn test_help_contains_throttling_flags() {
 }
 
 #[test]
+fn test_vacuum_index_cleanup_flags_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--vacuum-index-cleanup")
+        .arg("true")
+        .arg("--dry-run")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--vacuum-index-cleanup")
+        .arg("false")
+        .arg("--dry-run")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_vacuum_index_cleanup_omitted_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dry-run")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
 fn test_config_file_with_throttling_keys() {
     let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
     writeln!(

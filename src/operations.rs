@@ -569,6 +569,11 @@ async fn vacuum_table(
     if vacuum_opts.skip_locked {
         opts.push("SKIP_LOCKED".to_string());
     }
+    match vacuum_opts.index_cleanup {
+        Some(true) => opts.push("INDEX_CLEANUP TRUE".to_string()),
+        Some(false) => opts.push("INDEX_CLEANUP FALSE".to_string()),
+        None => {}
+    }
     let sql = format!(
         "VACUUM ({}) \"{}\".\"{}\"",
         opts.join(", "),
@@ -619,11 +624,11 @@ async fn freeze_table(
 ) -> Result<OperationResult, tokio_postgres::Error> {
     // INDEX_CLEANUP FALSE avoids index bloat during aggressive freeze passes.
     // VERBOSE surfaces progress notices to the PostgreSQL log.
-    let mut opts = vec![
-        "VERBOSE".to_string(),
-        "FREEZE".to_string(),
-        "INDEX_CLEANUP FALSE".to_string(),
-    ];
+    let mut opts = vec!["VERBOSE".to_string(), "FREEZE".to_string()];
+    match vacuum_opts.index_cleanup {
+        Some(true) => opts.push("INDEX_CLEANUP TRUE".to_string()),
+        Some(false) | None => opts.push("INDEX_CLEANUP FALSE".to_string()),
+    }
     if !vacuum_opts.truncate {
         opts.push("TRUNCATE FALSE".to_string());
     }
@@ -1237,11 +1242,15 @@ pub async fn run_freeze_wraparound(
         }
 
         if policy.dry_run {
+            let index_cleanup_str = match vacuum_opts.index_cleanup {
+                Some(true) => "INDEX_CLEANUP TRUE",
+                Some(false) | None => "INDEX_CLEANUP FALSE",
+            };
             logger.log(
                 LogLevel::Info,
                 &format!(
-                    "[DRY RUN] Would run: VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE) \"{}\".\"{}\"",
-                    t.schema_name, t.table_name
+                    "[DRY RUN] Would run: VACUUM (VERBOSE, FREEZE, {}) \"{}\".\"{}\"",
+                    index_cleanup_str, t.schema_name, t.table_name
                 ),
             );
             continue;
@@ -2431,6 +2440,11 @@ async fn vacuum_analyze_table(
     }
     if vacuum_opts.skip_locked {
         opts.push("SKIP_LOCKED".to_string());
+    }
+    match vacuum_opts.index_cleanup {
+        Some(true) => opts.push("INDEX_CLEANUP TRUE".to_string()),
+        Some(false) => opts.push("INDEX_CLEANUP FALSE".to_string()),
+        None => {}
     }
     let sql = format!(
         "VACUUM ({}) \"{}\".\"{}\"",

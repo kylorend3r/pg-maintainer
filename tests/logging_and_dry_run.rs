@@ -372,6 +372,36 @@ fn test_order_by_omitted_by_default() {
         .code(predicate::ne(2));
 }
 
+#[test]
+fn test_vacuum_index_cleanup_with_wraparound_dry_run() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("wraparound")
+        .arg("--vacuum-index-cleanup")
+        .arg("true")
+        .arg("--dry-run")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_vacuum_index_cleanup_false_with_wraparound_dry_run() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("wraparound")
+        .arg("--vacuum-index-cleanup")
+        .arg("false")
+        .arg("--dry-run")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
 // ── Integration tests (requires live DB) ──────────────────────────────────────
 
 #[tokio::test]

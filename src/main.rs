@@ -316,6 +316,13 @@ struct Args {
     #[arg(long, default_value = "false")]
     vacuum_skip_locked: bool,
 
+    /// Add INDEX_CLEANUP to VACUUM commands: true forces index cleanup on, false
+    /// forces it off (default: omitted — PostgreSQL decides via its own AUTO
+    /// heuristic). When explicitly set, this also overrides wraparound/freeze
+    /// mode's normal INDEX_CLEANUP FALSE.
+    #[arg(long, action = clap::ArgAction::Set)]
+    vacuum_index_cleanup: Option<bool>,
+
     // ── Config file ──────────────────────────────────────────────────────────
     /// Path to a TOML configuration file. CLI arguments take precedence.
     #[arg(short = 'C', long, value_name = "FILE")]
@@ -371,6 +378,7 @@ struct Config {
     vacuum_truncate: Option<bool>,
     vacuum_disable_page_skipping: Option<bool>,
     vacuum_skip_locked: Option<bool>,
+    vacuum_index_cleanup: Option<bool>,
 }
 
 fn resolve_env_interpolation(value: Option<String>) -> Option<String> {
@@ -567,6 +575,9 @@ fn merge_config(file: Config, mut args: Args) -> Args {
     }
     if !args.vacuum_skip_locked {
         args.vacuum_skip_locked = file.vacuum_skip_locked.unwrap_or(false);
+    }
+    if args.vacuum_index_cleanup.is_none() {
+        args.vacuum_index_cleanup = file.vacuum_index_cleanup;
     }
 
     args
@@ -1194,6 +1205,7 @@ async fn main() -> Result<()> {
         truncate: args.vacuum_truncate,
         disable_page_skipping: args.vacuum_disable_page_skipping,
         skip_locked: args.vacuum_skip_locked,
+        index_cleanup: args.vacuum_index_cleanup,
     };
 
     let mut already_handled: HashSet<(String, String)> = HashSet::new();
