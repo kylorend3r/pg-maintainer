@@ -155,6 +155,16 @@ pub async fn get_server_version_num(client: &tokio_postgres::Client) -> Result<i
     Ok(row.get(0))
 }
 
+/// Returns true if the connected server is a standby currently replaying WAL
+/// (i.e. `pg_is_in_recovery()`), false for a primary.
+pub async fn get_is_in_recovery(client: &tokio_postgres::Client) -> Result<bool> {
+    let row = client
+        .query_one(crate::queries::GET_IS_IN_RECOVERY, &[])
+        .await
+        .context("Failed to read pg_is_in_recovery()")?;
+    Ok(row.get(0))
+}
+
 /// Formats a server_version_num for display, e.g. 160003 -> "16.3", 90605 -> "9.6.5".
 fn format_pg_version(version_num: i32) -> String {
     if version_num >= 100000 {
@@ -196,6 +206,16 @@ pub async fn connect(
              were introduced in PostgreSQL 14; older servers are not supported.",
             crate::config::MIN_SUPPORTED_PG_VERSION_LABEL,
             format_pg_version(version_num),
+        ));
+    }
+
+    // Refuse to run against a standby (primary-only tool)
+    if get_is_in_recovery(&client).await? {
+        return Err(anyhow::anyhow!(
+            "pg-maintainer refuses to run against a standby: this connection is to \
+             a server in recovery (pg_is_in_recovery() = true), not a primary. \
+             Point --host/--dsn (or the connection's load balancer/proxy) at the \
+             primary instead."
         ));
     }
 
