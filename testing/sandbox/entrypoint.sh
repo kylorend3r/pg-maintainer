@@ -45,23 +45,23 @@ cat <<BANNER
   Database '$SANDBOX_DB' is seeded with tables that trigger each mode:
 
     fresh_signups        never vacuumed, never analyzed
-    bloated_events        ~90% dead tuples  -> prevent-bloat (default)
-    needs_vacuum_orders   ~25% dead tuples  -> needs-vacuum (opt-in)
+    bloated_events        ~90% dead tuples  -> prevent-bloat
+    needs_vacuum_orders   ~25% dead tuples  -> needs-vacuum
     quiet_archive         clean; should be skipped
 
-  The four default modes (never-vacuumed, never-analyzed, prevent-wraparound,
-  prevent-bloat) run automatically. needs-vacuum is opt-in via --mode.
+  Every mode is opt-in: pass the ones you want with --mode (or set `mode` in
+  a TOML config file). Nothing runs unless a mode is selected.
   A vacuum-horizon (xmin) diagnostic also runs before phase 1 by default.
 
   Try:
 
-    pg-maintainer -s public --dry-run
-    pg-maintainer -s public
+    pg-maintainer -s public --mode never-vacuumed,never-analyzed,prevent-wraparound,prevent-bloat --dry-run
+    pg-maintainer -s public --mode never-vacuumed,never-analyzed,prevent-wraparound,prevent-bloat
     pg-maintainer -s public --gentle --mode prevent-bloat
     pg-maintainer -s public --mode needs-vacuum --dry-run
     pg-maintainer -s public --mode prevent-wraparound --wraparound-min-age 1 --dry-run
-    pg-maintainer -s public --skip-xmin-horizon-check --dry-run
-    pg-maintainer -s public --dsn "postgres://postgres@/demo?host=/var/run/postgresql"
+    pg-maintainer -s public --mode prevent-bloat --skip-xmin-horizon-check --dry-run
+    pg-maintainer -s public --mode prevent-bloat --dsn "postgres://postgres@/demo?host=/var/run/postgresql"
     pg-maintainer --help
 
   Inspect the database with:   psql

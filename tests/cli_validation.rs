@@ -94,6 +94,8 @@ fn test_maintenance_work_mem_too_high() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--maintenance-work-mem-gb")
         .arg("50")
         .env_clear()
@@ -240,15 +242,17 @@ fn test_mode_needs_vacuum() {
 }
 
 #[test]
-fn test_mode_default_when_omitted() {
-    // When --mode is omitted, all four modes should run (no error)
+fn test_mode_required_when_omitted() {
+    // Every mode is opt-in: omitting --mode (and having no `mode` in a TOML
+    // config file) is a pre-connection validation error, not a default set.
     cmd()
         .arg("--schema")
         .arg("public")
         .arg("--dry-run")
         .env_clear()
         .assert()
-        .code(predicate::ne(2));
+        .failure()
+        .stderr(predicate::str::contains("--mode is required"));
 }
 
 // ── Table filter ───────────────────────────────────────────────────────────────
@@ -619,6 +623,8 @@ fn test_pgpass_wrong_permissions_emits_warning() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .env("PGPASSFILE", f.path().to_str().unwrap())
         .env_remove("PG_PASSWORD")
         .assert()
@@ -732,6 +738,8 @@ fn test_wraparound_pct_above_hundred_rejected() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--wraparound-pct")
         .arg("101")
         .env_clear()
@@ -888,6 +896,8 @@ fn test_bloat_threshold_pct_above_hundred_rejected() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--bloat-threshold-pct")
         .arg("101")
         .env_clear()
@@ -953,6 +963,8 @@ fn test_min_greater_than_max_rejected() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--min-table-size-gb")
         .arg("10")
         .arg("--max-table-size-gb")
@@ -1075,6 +1087,8 @@ fn test_vacuum_cost_delay_above_max_rejected() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--vacuum-cost-delay-ms")
         .arg("101")
         .env_clear()
@@ -1117,6 +1131,8 @@ fn test_vacuum_cost_limit_zero_rejected() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--vacuum-cost-limit")
         .arg("0")
         .env_clear()
@@ -1131,6 +1147,8 @@ fn test_vacuum_cost_limit_above_max_rejected() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--vacuum-cost-limit")
         .arg("10001")
         .env_clear()
@@ -1215,6 +1233,7 @@ fn test_config_file_with_invalid_throttling_value_rejected() {
         f,
         r#"
 schema = "public"
+mode = ["never-vacuumed"]
 vacuum-cost-limit = 50000
 "#
     )
@@ -1363,6 +1382,8 @@ fn test_explicit_flags_override_dsn_components() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--dsn")
         .arg("postgres://alice@127.0.0.1:1/from_dsn")
         .arg("--database")
@@ -1383,6 +1404,8 @@ fn test_dsn_fills_fields_not_given_as_flags() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--dsn")
         .arg("postgres://alice@127.0.0.1:1/from_dsn")
         .arg("--log-file")
@@ -1401,6 +1424,8 @@ fn test_dsn_outranks_env_vars() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--dsn")
         .arg("postgres://alice@127.0.0.1:1/from_dsn")
         .arg("--log-file")
@@ -1420,6 +1445,8 @@ fn test_env_var_fills_what_dsn_omits() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--dsn")
         .arg("postgres://alice@127.0.0.1:1")
         .arg("--log-file")
@@ -1438,6 +1465,8 @@ fn test_dsn_ignored_params_warned_about() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--dsn")
         .arg("postgres://alice@127.0.0.1:1/db?application_name=zzz")
         .arg("--log-file")
@@ -1605,6 +1634,8 @@ fn test_also_tables_bare_name_rejected_by_name() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--also-tables")
         .arg("orders")
         .env_clear()
@@ -1619,6 +1650,8 @@ fn test_also_tables_mixed_list_rejects_the_bare_entry() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--also-tables")
         .arg("public.orders,customers")
         .env_clear()
@@ -1632,6 +1665,8 @@ fn test_also_tables_too_many_dots_rejected() {
     cmd()
         .arg("--schema")
         .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
         .arg("--also-tables")
         .arg("a.b.c")
         .env_clear()
@@ -1706,6 +1741,7 @@ fn test_config_file_rejects_unqualified_also_table() {
         f,
         r#"
 schema = "public"
+mode = ["never-vacuumed"]
 also-tables = ["orders"]
 "#
     )

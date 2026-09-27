@@ -38,11 +38,11 @@ A single-threaded PostgreSQL table maintenance tool written in Rust. It runs fiv
 | 2 | `never-analyzed` | `ANALYZE` | Tables where neither manual nor autoanalyze has ever run |
 | 3 | `prevent-wraparound` | `VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE)` | Tables whose XID age exceeds the wraparound threshold |
 | 4 | `prevent-bloat` | `VACUUM (VERBOSE)` | Tables with excessive dead tuples (bloat > threshold, default 80%) |
-| 5 | `needs-vacuum` (opt-in) | `VACUUM (VERBOSE)` | Tables where dead tuples exceed the autovacuum threshold formula |
-| 6 | `vacuum-overdue` (opt-in) | `VACUUM (VERBOSE)` | Tables not vacuumed in N days (requires `--vacuum-older-than-days`) |
-| 7 | `analyze-overdue` (opt-in) | `ANALYZE` | Tables not analyzed in M days (requires `--analyze-older-than-days`) |
+| 5 | `needs-vacuum` | `VACUUM (VERBOSE)` | Tables where dead tuples exceed the autovacuum threshold formula |
+| 6 | `vacuum-overdue` | `VACUUM (VERBOSE)` | Tables not vacuumed in N days (requires `--vacuum-older-than-days`) |
+| 7 | `analyze-overdue` | `ANALYZE` | Tables not analyzed in M days (requires `--analyze-older-than-days`) |
 
-Modes 1–4 run by default in sequence on a single connection; modes 5–7 are opt-in. Partitioned parent tables (declarative partitioning) are automatically excluded from discovery — their partitions are maintained individually. Select individual modes with `--mode`; a table matched by an earlier mode in the same run is not reprocessed by a later mode.
+Every mode is opt-in — none run unless selected. `--mode` is required (via the flag or the `mode` key in a TOML config file); pass the modes you want as a comma-separated list, e.g. `--mode never-vacuumed,never-analyzed,prevent-wraparound,prevent-bloat`. Modes run in sequence on a single connection. Partitioned parent tables (declarative partitioning) are automatically excluded from discovery — their partitions are maintained individually. A table matched by an earlier mode in the same run is not reprocessed by a later mode.
 
 ### Vacuum-Horizon Diagnostics
 
@@ -90,7 +90,8 @@ docker run --rm \
   -e PG_HOST=db.internal -e PG_PORT=5432 -e PG_DATABASE=mydb \
   -e PG_USER=maintainer -e PG_PASSWORD_FILE=/run/secrets/pg_password \
   -v pg_secret:/run/secrets/pg_password:ro \
-  pg-maintainer:latest --discover-all-schemas
+  pg-maintainer:latest --discover-all-schemas \
+  --mode never-vacuumed,never-analyzed,prevent-wraparound,prevent-bloat
 ```
 
 For Kubernetes `CronJob` deployments, mount the password secret as a file:
@@ -126,30 +127,32 @@ spec:
 ## Usage
 
 ```bash
-# Maintain all schemas with default modes
-pg-maintainer -d mydb --discover-all-schemas
+# Maintain all schemas with the core four modes
+pg-maintainer -d mydb --discover-all-schemas \
+  --mode never-vacuumed,never-analyzed,prevent-wraparound,prevent-bloat
 
 # Maintain specific schemas
-pg-maintainer -d mydb -s public,analytics
+pg-maintainer -d mydb -s public,analytics \
+  --mode never-vacuumed,never-analyzed,prevent-wraparound,prevent-bloat
 
 # Run only specific modes
 pg-maintainer -d mydb -s public --mode never-vacuumed,prevent-bloat
 
-# Opt-in time-based maintenance
+# Time-based maintenance
 pg-maintainer -d mydb -s public --mode vacuum-overdue,analyze-overdue \
   --vacuum-older-than-days 30 --analyze-older-than-days 7
 
 # Preview actions before running
-pg-maintainer -d mydb -s public --dry-run
+pg-maintainer -d mydb -s public --mode prevent-bloat --dry-run
 
 # Run gently on busy servers
-pg-maintainer -d mydb -s public --gentle
+pg-maintainer -d mydb -s public --mode prevent-bloat --gentle
 
 # Rotate the log file daily (maintainer.log -> maintainer-2026-09-13.log);
 # old dated files are never deleted automatically — pair with logrotate or a cleanup cron
-pg-maintainer -d mydb -s public --log-rotation daily
+pg-maintainer -d mydb -s public --mode prevent-bloat --log-rotation daily
 
-# Use a connection string and config file
+# Use a connection string and config file (config.toml can set `mode` instead of passing --mode)
 pg-maintainer --dsn "postgres://user@host:5432/mydb" -C config.toml
 ```
 
@@ -188,7 +191,7 @@ password = "${PG_PASSWORD}"   # env-var interpolation supported
 
 discover-all-schemas = true
 dry-run = false
-mode = "never-vacuumed,never-analyzed,prevent-wraparound,prevent-bloat"   # default when omitted: all four
+mode = ["never-vacuumed", "never-analyzed", "prevent-wraparound", "prevent-bloat"]   # required — every mode is opt-in
 maintenance-work-mem-gb = 2
 ```
 

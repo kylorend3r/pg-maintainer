@@ -81,11 +81,11 @@ struct Args {
     // ── Mode selection ───────────────────────────────────────────────────────
     /// Comma-separated modes to run: never-vacuumed, never-analyzed, prevent-wraparound, prevent-bloat,
     /// needs-vacuum, vacuum-overdue, analyze-overdue.
-    /// Defaults to the first four when omitted.
+    /// Required (via this flag or the `mode` key in a TOML config file) — every mode is opt-in, none run by default.
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Modes to run: never-vacuumed, never-analyzed, prevent-wraparound, prevent-bloat, needs-vacuum, vacuum-overdue, analyze-overdue"
+        help = "Modes to run (required): never-vacuumed, never-analyzed, prevent-wraparound, prevent-bloat, needs-vacuum, vacuum-overdue, analyze-overdue"
     )]
     mode: Option<Vec<String>>,
 
@@ -740,15 +740,10 @@ async fn main() -> Result<()> {
         }
         modes
     } else {
-        [
-            Mode::NeverVacuumed,
-            Mode::NeverAnalyzed,
-            Mode::PreventWraparound,
-            Mode::PreventBloat,
-        ]
-        .iter()
-        .copied()
-        .collect()
+        return Err(anyhow::anyhow!(
+            "--mode is required (e.g. --mode never-vacuumed,never-analyzed,prevent-wraparound,prevent-bloat); \
+             every mode is opt-in and none run by default. Set it via --mode or the `mode` key in a TOML config file."
+        ));
     };
 
     // Validate overdue maintenance modes and flags
@@ -1258,7 +1253,7 @@ async fn main() -> Result<()> {
 
     // ── Phase 1: VACUUM never-vacuumed tables ─────────────────────────────────
     let vacuum_summary = if enabled_modes.contains(&Mode::NeverVacuumed) {
-        logger.log(LogLevel::Info, "═══ Phase 1: VACUUM (never vacuumed) ═══");
+        logger.log(LogLevel::Info, "═══ VACUUM (never vacuumed) ═══");
         logger.log(
             LogLevel::Info,
             "Searching for tables that have never been vacuumed...",
@@ -1290,13 +1285,16 @@ async fn main() -> Result<()> {
         .await
         .context("VACUUM phase failed")?
     } else {
-        logger.log(LogLevel::Info, "Skipping Phase 1: VACUUM (not in --mode)");
+        logger.log(
+            LogLevel::Info,
+            "Skipping VACUUM (never vacuumed) (not in --mode)",
+        );
         Default::default()
     };
 
     // ── Phase 2: ANALYZE never-analyzed tables ────────────────────────────────
     let analyze_summary = if enabled_modes.contains(&Mode::NeverAnalyzed) {
-        logger.log(LogLevel::Info, "═══ Phase 2: ANALYZE (never analyzed) ═══");
+        logger.log(LogLevel::Info, "═══ ANALYZE (never analyzed) ═══");
         logger.log(
             LogLevel::Info,
             "Searching for tables that have never been analyzed...",
@@ -1329,7 +1327,10 @@ async fn main() -> Result<()> {
         .await
         .context("ANALYZE phase failed")?
     } else {
-        logger.log(LogLevel::Info, "Skipping Phase 2: ANALYZE (not in --mode)");
+        logger.log(
+            LogLevel::Info,
+            "Skipping ANALYZE (never analyzed) (not in --mode)",
+        );
         Default::default()
     };
 
@@ -1337,7 +1338,7 @@ async fn main() -> Result<()> {
     let freeze_summary = if enabled_modes.contains(&Mode::PreventWraparound) {
         logger.log(
             LogLevel::Info,
-            "═══ Phase 3: VACUUM FREEZE (wraparound candidates) ═══",
+            "═══ VACUUM FREEZE (wraparound candidates) ═══",
         );
         let candidates = operations::find_wraparound_candidates(
             &client,
@@ -1369,14 +1370,14 @@ async fn main() -> Result<()> {
     } else {
         logger.log(
             LogLevel::Info,
-            "Skipping Phase 3: VACUUM FREEZE (not in --mode)",
+            "Skipping VACUUM FREEZE (wraparound candidates) (not in --mode)",
         );
         Default::default()
     };
 
     // ── Phase 4: VACUUM bloat candidates ─────────────────────────────────────
     let bloat_summary = if enabled_modes.contains(&Mode::PreventBloat) {
-        logger.log(LogLevel::Info, "═══ Phase 4: VACUUM (bloat) ═══");
+        logger.log(LogLevel::Info, "═══ VACUUM (bloat) ═══");
         logger.log(
             LogLevel::Info,
             &format!(
@@ -1415,16 +1416,13 @@ async fn main() -> Result<()> {
         }
         summary
     } else {
-        logger.log(
-            LogLevel::Info,
-            "Skipping Phase 4: VACUUM (bloat) (not in --mode)",
-        );
+        logger.log(LogLevel::Info, "Skipping VACUUM (bloat) (not in --mode)");
         Default::default()
     };
 
     // ── Phase 5: VACUUM needs-vacuum candidates ──────────────────────────────
     let needs_vacuum_summary = if enabled_modes.contains(&Mode::NeedsVacuum) {
-        logger.log(LogLevel::Info, "═══ Phase 5: VACUUM (needs vacuum) ═══");
+        logger.log(LogLevel::Info, "═══ VACUUM (needs vacuum) ═══");
 
         let (server_vacuum_threshold, server_vacuum_scale_factor) =
             match operations::get_vacuum_settings(&client).await {
@@ -1500,7 +1498,7 @@ async fn main() -> Result<()> {
     } else {
         logger.log(
             LogLevel::Info,
-            "Skipping Phase 5: VACUUM (needs vacuum) (not in --mode)",
+            "Skipping VACUUM (needs vacuum) (not in --mode)",
         );
         Default::default()
     };
@@ -1510,7 +1508,7 @@ async fn main() -> Result<()> {
         let older_than_days = args.vacuum_older_than_days.unwrap() as i32;
         logger.log(
             LogLevel::Info,
-            &format!("═══ Phase 6: VACUUM (not vacuumed in {older_than_days} days) ═══"),
+            &format!("═══ VACUUM (not vacuumed in {older_than_days} days) ═══"),
         );
         logger.log(
             LogLevel::Info,
@@ -1544,10 +1542,7 @@ async fn main() -> Result<()> {
         }
         summary
     } else {
-        logger.log(
-            LogLevel::Info,
-            "Skipping Phase 6: VACUUM (overdue) (not in --mode)",
-        );
+        logger.log(LogLevel::Info, "Skipping VACUUM (overdue) (not in --mode)");
         Default::default()
     };
 
@@ -1556,7 +1551,7 @@ async fn main() -> Result<()> {
         let older_than_days = args.analyze_older_than_days.unwrap() as i32;
         logger.log(
             LogLevel::Info,
-            &format!("═══ Phase 7: ANALYZE (not analyzed in {older_than_days} days) ═══"),
+            &format!("═══ ANALYZE (not analyzed in {older_than_days} days) ═══"),
         );
         logger.log(
             LogLevel::Info,
@@ -1589,10 +1584,7 @@ async fn main() -> Result<()> {
         }
         summary
     } else {
-        logger.log(
-            LogLevel::Info,
-            "Skipping Phase 7: ANALYZE (overdue) (not in --mode)",
-        );
+        logger.log(LogLevel::Info, "Skipping ANALYZE (overdue) (not in --mode)");
         Default::default()
     };
 
@@ -1600,10 +1592,7 @@ async fn main() -> Result<()> {
     // Runs after whichever modes were selected, in addition to them — it is not a
     // --mode value.
     let also_tables_summary = if !also_tables.is_empty() {
-        logger.log(
-            LogLevel::Info,
-            "═══ Phase 8: VACUUM (ANALYZE) (--also-tables) ═══",
-        );
+        logger.log(LogLevel::Info, "═══ VACUUM (ANALYZE) (--also-tables) ═══");
         operations::run_also_tables(
             &client,
             &also_tables,
