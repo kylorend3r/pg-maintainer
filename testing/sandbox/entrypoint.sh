@@ -44,17 +44,23 @@ cat <<BANNER
   PostgreSQL $(gosu postgres psql -tAc 'show server_version') is running locally, autovacuum off.
   Database '$SANDBOX_DB' is seeded with tables that trigger each mode:
 
-    fresh_signups      never vacuumed, never analyzed
-    bloated_events     ~90% dead tuples          -> bloated
-    stale_customers    heavily modified since analyze -> stale-stats
-    quiet_archive      clean; should be skipped
+    fresh_signups        never vacuumed, never analyzed
+    bloated_events        ~90% dead tuples  -> prevent-bloat (default)
+    needs_vacuum_orders   ~25% dead tuples  -> needs-vacuum (opt-in)
+    quiet_archive         clean; should be skipped
+
+  The four default modes (never-vacuumed, never-analyzed, prevent-wraparound,
+  prevent-bloat) run automatically. needs-vacuum is opt-in via --mode.
+  A vacuum-horizon (xmin) diagnostic also runs before phase 1 by default.
 
   Try:
 
     pg-maintainer -s public --dry-run
     pg-maintainer -s public
-    pg-maintainer -s public --gentle --mode bloated
-    pg-maintainer -s public --mode wraparound --wraparound-min-age 1 --dry-run
+    pg-maintainer -s public --gentle --mode prevent-bloat
+    pg-maintainer -s public --mode needs-vacuum --dry-run
+    pg-maintainer -s public --mode prevent-wraparound --wraparound-min-age 1 --dry-run
+    pg-maintainer -s public --skip-xmin-horizon-check --dry-run
     pg-maintainer -s public --dsn "postgres://postgres@/demo?host=/var/run/postgresql"
     pg-maintainer --help
 

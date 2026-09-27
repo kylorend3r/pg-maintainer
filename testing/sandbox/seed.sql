@@ -15,7 +15,7 @@
 
 \echo '  loading tables ...'
 
-DROP TABLE IF EXISTS fresh_signups, bloated_events, stale_customers, quiet_archive;
+DROP TABLE IF EXISTS fresh_signups, bloated_events, needs_vacuum_orders, quiet_archive;
 
 CREATE TABLE fresh_signups AS
 SELECT g                                   AS id,
@@ -30,11 +30,11 @@ SELECT g                      AS id,
        repeat('payload-', 20) AS payload
 FROM generate_series(1, 200000) g;
 
-CREATE TABLE stale_customers AS
+CREATE TABLE needs_vacuum_orders AS
 SELECT g                  AS id,
-       'customer ' || g   AS name,
-       (g % 100)::numeric AS balance
-FROM generate_series(1, 5000) g;
+       'order-' || g      AS ref,
+       (g % 50)::numeric  AS amount
+FROM generate_series(1, 20000) g;
 
 CREATE TABLE quiet_archive AS
 SELECT g AS id, md5(g::text) AS checksum
@@ -47,24 +47,23 @@ FROM generate_series(1, 10000) g;
 \echo '  establishing a clean baseline ...'
 
 VACUUM ANALYZE bloated_events;
-VACUUM ANALYZE stale_customers;
+VACUUM ANALYZE needs_vacuum_orders;
 VACUUM ANALYZE quiet_archive;
 
 \connect demo
 
 -- ── Phase 3: dirty them, each in exactly one way ─────────────────────────────
 
-\echo '  creating bloat and stale statistics ...'
+\echo '  creating dead tuples at two different severities ...'
 
--- ~90% of rows become dead tuples. With autovacuum off they stay that way.
+-- ~90% of rows become dead tuples: above the prevent-bloat default (80%).
+-- With autovacuum off they stay that way.
 DELETE FROM bloated_events WHERE id % 10 <> 0;
 
--- Far more modifications than analyze_threshold + 0.1 * live_rows, so the
--- planner's statistics for this table are now stale.
-INSERT INTO stale_customers
-SELECT g, 'customer ' || g, (g % 100)::numeric
-FROM generate_series(5001, 25000) g;
-UPDATE stale_customers SET balance = balance + 1 WHERE id % 3 = 0;
+-- ~25% dead tuples: below the prevent-bloat threshold, but comfortably above
+-- the real autovacuum formula (default threshold 50 + scale_factor 0.2 *
+-- live_rows), so only the opt-in needs-vacuum mode picks this one up.
+DELETE FROM needs_vacuum_orders WHERE id % 4 = 0;
 
 -- quiet_archive is left untouched on purpose: no dead tuples, fresh statistics.
 -- A correct run should report no work for it in any mode.
