@@ -54,3 +54,12 @@ pub const LOGBOOK_SCHEMA_NAME: &str = "maintainer_logbook";
 // Replica-lag gating. The gate is off unless --max-replica-lag-seconds is given.
 pub const DEFAULT_REPLICA_LAG_WAIT_SECONDS: u64 = 300;
 pub const REPLICA_LAG_POLL_INTERVAL_SECONDS: u64 = 5;
+
+// lock_timeout retry. 0 retries (the default) preserves the original behavior:
+// a table that can't get its lock within lock_timeout is skipped immediately.
+// The delay doubles after each retry, so the max total wait per table is bounded
+// by MAX_LOCK_TIMEOUT_RETRIES retries at up to MAX_LOCK_TIMEOUT_RETRY_DELAY_MS each.
+pub const DEFAULT_LOCK_TIMEOUT_RETRIES: u32 = 0;
+pub const MAX_LOCK_TIMEOUT_RETRIES: u32 = 20;
+pub const DEFAULT_LOCK_TIMEOUT_RETRY_DELAY_MS: u64 = 50;
+pub const MAX_LOCK_TIMEOUT_RETRY_DELAY_MS: u64 = 60_000;

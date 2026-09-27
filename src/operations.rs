@@ -7,6 +7,7 @@ use crate::types::{
 };
 use crate::vacuum_output;
 use anyhow::Result;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::watch;
@@ -541,6 +542,54 @@ fn is_lock_timeout(err: &tokio_postgres::Error) -> bool {
     err.code() == Some(&SqlState::LOCK_NOT_AVAILABLE)
 }
 
+/// Retry `op` when it fails on lock_timeout, up to `policy.lock_timeout_retries`
+/// times, waiting `policy.lock_timeout_retry_delay_ms` before the first retry and
+/// doubling the delay after each subsequent one. With the default of 0 retries,
+/// `op` runs exactly once, matching the original fail-fast behavior.
+///
+/// A non-lock_timeout error, or a lock_timeout error once retries are exhausted,
+/// is returned as-is so the caller's existing skip/fail handling runs unchanged.
+/// A shutdown signal received while waiting between retries also returns the
+/// lock_timeout error immediately — the table is recorded as skipped, and the
+/// caller's loop stops after it on the next shutdown check.
+async fn with_lock_timeout_retry<F, Fut>(
+    policy: RunPolicy,
+    schema: &str,
+    table: &str,
+    logger: &Logger,
+    shutdown_rx: &mut watch::Receiver<bool>,
+    op: F,
+) -> Result<OperationResult, tokio_postgres::Error>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<OperationResult, tokio_postgres::Error>>,
+{
+    let mut delay_ms = policy.lock_timeout_retry_delay_ms;
+    let mut attempt = 0;
+    loop {
+        let err = match op().await {
+            Ok(result) => return Ok(result),
+            Err(e) => e,
+        };
+        if !is_lock_timeout(&err) || attempt >= policy.lock_timeout_retries {
+            return Err(err);
+        }
+        attempt += 1;
+        logger.log(
+            LogLevel::Warning,
+            &format!(
+                "\"{schema}\".\"{table}\" hit lock_timeout — retrying ({attempt}/{}) in {delay_ms}ms",
+                policy.lock_timeout_retries
+            ),
+        );
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {}
+            _ = shutdown_rx.changed() => return Err(err),
+        }
+        delay_ms = delay_ms.saturating_mul(2);
+    }
+}
+
 // ─── Individual table operations ──────────────────────────────────────────────
 
 /// Double any embedded `"` so an identifier can't break out of its quoting.
@@ -877,7 +926,16 @@ pub async fn run_vacuum_never_vacuumed(
             OP_VACUUM,
         );
         let start = Instant::now();
-        match vacuum_table(client, &t.schema_name, &t.table_name, vacuum_opts).await {
+        match with_lock_timeout_retry(
+            policy,
+            &t.schema_name,
+            &t.table_name,
+            logger,
+            shutdown_rx,
+            || vacuum_table(client, &t.schema_name, &t.table_name, vacuum_opts),
+        )
+        .await
+        {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_VACUUM, start.elapsed());
@@ -967,9 +1025,7 @@ pub async fn run_vacuum_never_vacuumed(
 pub async fn run_analyze_never_analyzed(
     client: &Client,
     tables: &[TableInfo],
-    dry_run: bool,
-    force: bool,
-    skip_active_vacuum: bool,
+    policy: RunPolicy,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
     lag_gate: Option<&ReplicaLagGate>,
@@ -988,13 +1044,6 @@ pub async fn run_analyze_never_analyzed(
         LogLevel::Info,
         &format!("Found {} never-analyzed table(s).", tables.len()),
     );
-
-    let policy = RunPolicy {
-        dry_run,
-        force,
-        skip_active_vacuum,
-        check_xmin_horizon: false,
-    };
 
     for (i, t) in tables.iter().enumerate() {
         // Check if shutdown was requested
@@ -1040,7 +1089,7 @@ pub async fn run_analyze_never_analyzed(
             continue;
         }
 
-        if dry_run {
+        if policy.dry_run {
             logger.log(
                 LogLevel::Info,
                 &format!(
@@ -1059,7 +1108,16 @@ pub async fn run_analyze_never_analyzed(
             OP_ANALYZE,
         );
         let start = Instant::now();
-        match analyze_table(client, &t.schema_name, &t.table_name).await {
+        match with_lock_timeout_retry(
+            policy,
+            &t.schema_name,
+            &t.table_name,
+            logger,
+            shutdown_rx,
+            || analyze_table(client, &t.schema_name, &t.table_name),
+        )
+        .await
+        {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(
@@ -1070,7 +1128,7 @@ pub async fn run_analyze_never_analyzed(
                 );
                 log_maintenance_operation(
                     client,
-                    dry_run,
+                    policy.dry_run,
                     LogEntry {
                         schema: &t.schema_name,
                         table: &t.table_name,
@@ -1106,7 +1164,7 @@ pub async fn run_analyze_never_analyzed(
                     );
                     log_maintenance_operation(
                         client,
-                        dry_run,
+                        policy.dry_run,
                         LogEntry {
                             schema: &t.schema_name,
                             table: &t.table_name,
@@ -1267,7 +1325,16 @@ pub async fn run_freeze_wraparound(
             OP_FREEZE,
         );
         let start = Instant::now();
-        match freeze_table(client, &t.schema_name, &t.table_name, vacuum_opts).await {
+        match with_lock_timeout_retry(
+            policy,
+            &t.schema_name,
+            &t.table_name,
+            logger,
+            shutdown_rx,
+            || freeze_table(client, &t.schema_name, &t.table_name, vacuum_opts),
+        )
+        .await
+        {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_FREEZE, start.elapsed());
@@ -1438,7 +1505,16 @@ pub async fn run_bloat_vacuum(
 
         logger.log_table_start(i + 1, tables.len(), &t.schema_name, &t.table_name, OP_BLOAT);
         let start = Instant::now();
-        match vacuum_table(client, &t.schema_name, &t.table_name, vacuum_opts).await {
+        match with_lock_timeout_retry(
+            policy,
+            &t.schema_name,
+            &t.table_name,
+            logger,
+            shutdown_rx,
+            || vacuum_table(client, &t.schema_name, &t.table_name, vacuum_opts),
+        )
+        .await
+        {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_BLOAT, start.elapsed());
@@ -1634,7 +1710,16 @@ pub async fn run_needs_vacuum(
             OP_NEEDS_VACUUM,
         );
         let start = Instant::now();
-        match vacuum_table(client, &t.schema_name, &t.table_name, vacuum_opts).await {
+        match with_lock_timeout_retry(
+            policy,
+            &t.schema_name,
+            &t.table_name,
+            logger,
+            shutdown_rx,
+            || vacuum_table(client, &t.schema_name, &t.table_name, vacuum_opts),
+        )
+        .await
+        {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(
@@ -1831,7 +1916,16 @@ pub async fn run_vacuum_overdue(
             OP_VACUUM_OVERDUE,
         );
         let start = Instant::now();
-        match vacuum_table(client, &t.schema_name, &t.table_name, vacuum_opts).await {
+        match with_lock_timeout_retry(
+            policy,
+            &t.schema_name,
+            &t.table_name,
+            logger,
+            shutdown_rx,
+            || vacuum_table(client, &t.schema_name, &t.table_name, vacuum_opts),
+        )
+        .await
+        {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(
@@ -2003,7 +2097,16 @@ pub async fn run_analyze_overdue(
             OP_ANALYZE_OVERDUE,
         );
         let start = Instant::now();
-        match analyze_table(client, &t.schema_name, &t.table_name).await {
+        match with_lock_timeout_retry(
+            policy,
+            &t.schema_name,
+            &t.table_name,
+            logger,
+            shutdown_rx,
+            || analyze_table(client, &t.schema_name, &t.table_name),
+        )
+        .await
+        {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(
@@ -2800,7 +2903,16 @@ pub async fn run_also_tables(
             OP_VACUUM_ANALYZE,
         );
         let start = Instant::now();
-        match vacuum_analyze_table(client, &t.schema_name, &t.table_name, vacuum_opts).await {
+        match with_lock_timeout_retry(
+            policy,
+            &t.schema_name,
+            &t.table_name,
+            logger,
+            shutdown_rx,
+            || vacuum_analyze_table(client, &t.schema_name, &t.table_name, vacuum_opts),
+        )
+        .await
+        {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(

@@ -8,7 +8,7 @@ A single-threaded PostgreSQL table maintenance tool written in Rust. It runs fiv
 
 - **No extensions required** — vacuum/analyze/freeze use only standard `pg_catalog` views; bloat detection is statistics-based (`pg_stat_user_tables`), not `pgstattuple` or `pg_repack`. Works on any standard PostgreSQL installation, including managed services where you can't install extensions.
 - **Targets only what needs work** — each mode discovers real candidates (never vacuumed, never analyzed, wraparound risk, or bloat above threshold) instead of blindly running maintenance across every table.
-- **Safe by default** — active-vacuum detection skips conflicting tables (or terminates them with `--force`); a 10ms `lock_timeout` makes runs fail fast instead of blocking production traffic; `--dry-run` previews every action before anything executes.
+- **Safe by default** — active-vacuum detection skips conflicting tables (or terminates them with `--force`); a 10ms `lock_timeout` makes runs fail fast instead of blocking production traffic (optionally with a few retries via `--lock-timeout-retries`); `--dry-run` previews every action before anything executes.
 - **Size-aware** — `--min-table-size-gb`/`--max-table-size-gb` exclude tiny or oversized tables from any mode.
 - **Flexible credentials** — `PG_PASSWORD` env var, `PG_PASSWORD_FILE` (Docker/Kubernetes secrets), `.pgpass`, or CLI flag (with an insecurity warning). No plaintext passwords required in scripts.
 - **Container-ready** — ships as a Docker image; all connection config comes from environment variables or mounted secrets, so it drops straight into a Kubernetes `CronJob` or a docker-compose one-off job.
@@ -147,6 +147,10 @@ pg-maintainer -d mydb -s public --mode prevent-bloat --dry-run
 
 # Run gently on busy servers
 pg-maintainer -d mydb -s public --mode prevent-bloat --gentle
+
+# Retry a table up to 3 times (100ms, 200ms, 400ms) if it can't get its lock
+# within lock_timeout, instead of skipping it on the first miss
+pg-maintainer -d mydb -s public --mode prevent-bloat --lock-timeout-retries 3 --lock-timeout-retry-delay-ms 100
 
 # Rotate the log file daily (maintainer.log -> maintainer-2026-09-13.log);
 # old dated files are never deleted automatically — pair with logrotate or a cleanup cron

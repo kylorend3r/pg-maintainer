@@ -222,6 +222,27 @@ struct Args {
     )]
     gentle: bool,
 
+    // ── Lock-timeout retry ───────────────────────────────────────────────────
+    /// Retry a table's VACUUM/ANALYZE up to N times if it can't acquire its lock
+    /// within lock_timeout (10ms), instead of skipping it immediately. 0 (default)
+    /// keeps the original fail-fast behavior.
+    #[arg(
+        long,
+        value_name = "N",
+        default_value_t = pg_maintainer::config::DEFAULT_LOCK_TIMEOUT_RETRIES,
+        help = "Retry a table up to N times on lock_timeout before skipping it (default: 0)"
+    )]
+    lock_timeout_retries: u32,
+
+    /// Delay before the first retry; doubles after each subsequent retry.
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value_t = pg_maintainer::config::DEFAULT_LOCK_TIMEOUT_RETRY_DELAY_MS,
+        help = "Delay before retrying after lock_timeout; doubles each retry (default: 50ms)"
+    )]
+    lock_timeout_retry_delay_ms: u64,
+
     // ── Replication lag ──────────────────────────────────────────────────────
     /// Hold maintenance on each table while any standby's replay lag exceeds this
     /// many seconds. Omit to disable lag gating entirely.
@@ -381,6 +402,8 @@ struct Config {
     vacuum_cost_delay_ms: Option<f64>,
     vacuum_cost_limit: Option<i32>,
     gentle: Option<bool>,
+    lock_timeout_retries: Option<u32>,
+    lock_timeout_retry_delay_ms: Option<u64>,
     max_replica_lag_seconds: Option<f64>,
     max_replica_lag_wait_seconds: Option<u64>,
     skip_xmin_horizon_check: Option<bool>,
@@ -524,6 +547,18 @@ fn merge_config(file: Config, mut args: Args) -> Args {
     }
     if !args.gentle {
         args.gentle = file.gentle.unwrap_or(false);
+    }
+
+    if args.lock_timeout_retries == pg_maintainer::config::DEFAULT_LOCK_TIMEOUT_RETRIES
+        && let Some(v) = file.lock_timeout_retries
+    {
+        args.lock_timeout_retries = v;
+    }
+    if args.lock_timeout_retry_delay_ms
+        == pg_maintainer::config::DEFAULT_LOCK_TIMEOUT_RETRY_DELAY_MS
+        && let Some(v) = file.lock_timeout_retry_delay_ms
+    {
+        args.lock_timeout_retry_delay_ms = v;
     }
 
     if args.max_replica_lag_seconds.is_none() {
@@ -865,6 +900,24 @@ async fn main() -> Result<()> {
         return Err(anyhow::anyhow!(
             "--xmin-horizon-warn-age ({}) must be >= 0",
             args.xmin_horizon_warn_age
+        ));
+    }
+
+    // Validate lock_timeout retry settings
+    if args.lock_timeout_retries > pg_maintainer::config::MAX_LOCK_TIMEOUT_RETRIES {
+        return Err(anyhow::anyhow!(
+            "--lock-timeout-retries ({}) must be <= {}",
+            args.lock_timeout_retries,
+            pg_maintainer::config::MAX_LOCK_TIMEOUT_RETRIES
+        ));
+    }
+    if !(1..=pg_maintainer::config::MAX_LOCK_TIMEOUT_RETRY_DELAY_MS)
+        .contains(&args.lock_timeout_retry_delay_ms)
+    {
+        return Err(anyhow::anyhow!(
+            "--lock-timeout-retry-delay-ms ({}) must be between 1 and {}",
+            args.lock_timeout_retry_delay_ms,
+            pg_maintainer::config::MAX_LOCK_TIMEOUT_RETRY_DELAY_MS
         ));
     }
 
@@ -1238,6 +1291,8 @@ async fn main() -> Result<()> {
         force: args.force,
         skip_active_vacuum: args.skip_active_vacuum,
         check_xmin_horizon: !args.skip_xmin_horizon_check,
+        lock_timeout_retries: args.lock_timeout_retries,
+        lock_timeout_retry_delay_ms: args.lock_timeout_retry_delay_ms,
     };
 
     let vacuum_opts = pg_maintainer::types::VacuumOptions {
@@ -1317,9 +1372,7 @@ async fn main() -> Result<()> {
         operations::run_analyze_never_analyzed(
             &client,
             &candidates,
-            args.dry_run,
-            args.force,
-            args.skip_active_vacuum,
+            run_policy,
             &logger,
             &mut shutdown_rx,
             lag_gate.as_deref(),
