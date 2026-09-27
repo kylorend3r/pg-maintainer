@@ -28,9 +28,9 @@ dry-run = false              # show commands without executing them
 force   = false              # terminate conflicting manual VACUUM sessions; autovacuum is always terminated
 # skip-active-vacuum = false   # never terminate conflicting VACUUM; always skip the table instead
                              # (mutually exclusive with force)
-# mode  = "never-vacuumed,never-analyzed,prevent-wraparound,prevent-bloat"
-                             # comma-separated modes to run
-                             # default (omitted): all four modes
+mode = ["never-vacuumed", "never-analyzed", "prevent-wraparound", "prevent-bloat"]
+                             # required — every mode is opt-in, none run unless listed here
+                             # (or passed via --mode, which takes precedence over this file)
 
 # ── Bloat detection (prevent-bloat mode) ─────────────────────────────────────
 bloat-threshold-pct = 80.0   # flag tables with > this % dead tuples
