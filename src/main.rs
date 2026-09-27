@@ -134,22 +134,22 @@ struct Args {
     #[arg(long, default_value_t = DEFAULT_BLOAT_THRESHOLD_PCT)]
     bloat_threshold_pct: f64,
 
-    // ── Stale-stats tuning ───────────────────────────────────────────────────
-    /// Flat modification-count floor before a table is considered for re-analysis.
-    /// Defaults to the connected server's autovacuum_analyze_threshold if omitted.
+    // ── Needs-vacuum tuning ──────────────────────────────────────────────────
+    /// Flat dead-tuple floor before a table is considered for vacuuming.
+    /// Defaults to the connected server's autovacuum_vacuum_threshold if omitted.
     #[arg(
         long,
-        help = "Modification-count floor for stale-stats (default: read from server's autovacuum_analyze_threshold)"
+        help = "Dead-tuple floor for needs-vacuum (default: read from server's autovacuum_vacuum_threshold)"
     )]
-    analyze_threshold: Option<i64>,
+    vacuum_threshold: Option<i64>,
 
-    /// Scale factor applied to live row count when computing the re-analyze threshold.
-    /// Defaults to the connected server's autovacuum_analyze_scale_factor if omitted.
+    /// Scale factor applied to live row count when computing the vacuum threshold.
+    /// Defaults to the connected server's autovacuum_vacuum_scale_factor if omitted.
     #[arg(
         long,
-        help = "Scale factor for stale-stats (default: read from server's autovacuum_analyze_scale_factor)"
+        help = "Scale factor for needs-vacuum (default: read from server's autovacuum_vacuum_scale_factor)"
     )]
-    analyze_scale_factor: Option<f64>,
+    vacuum_scale_factor: Option<f64>,
 
     // ── Size filtering ───────────────────────────────────────────────────────
     /// Minimum table size in GB. Tables smaller than this are excluded.
@@ -240,6 +240,25 @@ struct Args {
         help = "Max wait per table for replica lag to recover; 0 = skip immediately"
     )]
     max_replica_lag_wait_seconds: u64,
+
+    // ── Vacuum-horizon check ──────────────────────────────────────────────────
+    /// Disable the pre-flight vacuum-horizon check (which diagnoses what's holding
+    /// back the xmin frontier, if anything). Useful on roles without pg_read_all_stats.
+    #[arg(
+        long,
+        help = "Skip the vacuum-horizon diagnostic (default: run the check)"
+    )]
+    skip_xmin_horizon_check: bool,
+
+    /// XID age above which to emit a warning about horizon blockers. Below this
+    /// threshold, the horizon status is logged at INFO level instead of WARNING.
+    #[arg(
+        long,
+        value_name = "XIDS",
+        default_value_t = pg_maintainer::config::DEFAULT_XMIN_HORIZON_WARN_AGE,
+        help = "Warn if horizon blockers have exceeded this XID age (default: 1M XIDs)"
+    )]
+    xmin_horizon_warn_age: i64,
 
     // ── Explicit table list ──────────────────────────────────────────────────
     /// Schema-qualified tables to VACUUM (ANALYZE) after the selected modes finish,
@@ -352,8 +371,8 @@ struct Config {
     vacuum_older_than_days: Option<i64>,
     analyze_older_than_days: Option<i64>,
     bloat_threshold_pct: Option<f64>,
-    analyze_threshold: Option<i64>,
-    analyze_scale_factor: Option<f64>,
+    vacuum_threshold: Option<i64>,
+    vacuum_scale_factor: Option<f64>,
     min_table_size_gb: Option<f64>,
     max_table_size_gb: Option<f64>,
     wraparound_min_age: Option<i64>,
@@ -364,6 +383,8 @@ struct Config {
     gentle: Option<bool>,
     max_replica_lag_seconds: Option<f64>,
     max_replica_lag_wait_seconds: Option<u64>,
+    skip_xmin_horizon_check: Option<bool>,
+    xmin_horizon_warn_age: Option<i64>,
     also_tables: Option<Vec<String>>,
     sslmode: Option<String>,
     ssl_ca_cert: Option<String>,
@@ -468,11 +489,11 @@ fn merge_config(file: Config, mut args: Args) -> Args {
     {
         args.bloat_threshold_pct = v;
     }
-    if args.analyze_threshold.is_none() {
-        args.analyze_threshold = file.analyze_threshold;
+    if args.vacuum_threshold.is_none() {
+        args.vacuum_threshold = file.vacuum_threshold;
     }
-    if args.analyze_scale_factor.is_none() {
-        args.analyze_scale_factor = file.analyze_scale_factor;
+    if args.vacuum_scale_factor.is_none() {
+        args.vacuum_scale_factor = file.vacuum_scale_factor;
     }
     if args.min_table_size_gb.is_none() {
         args.min_table_size_gb = file.min_table_size_gb;
@@ -512,6 +533,14 @@ fn merge_config(file: Config, mut args: Args) -> Args {
         && let Some(v) = file.max_replica_lag_wait_seconds
     {
         args.max_replica_lag_wait_seconds = v;
+    }
+    if !args.skip_xmin_horizon_check {
+        args.skip_xmin_horizon_check = file.skip_xmin_horizon_check.unwrap_or(false);
+    }
+    if args.xmin_horizon_warn_age == pg_maintainer::config::DEFAULT_XMIN_HORIZON_WARN_AGE
+        && let Some(v) = file.xmin_horizon_warn_age
+    {
+        args.xmin_horizon_warn_age = v;
     }
     if args.also_tables.is_none() {
         args.also_tables = file.also_tables;
@@ -714,9 +743,8 @@ async fn main() -> Result<()> {
         [
             Mode::NeverVacuumed,
             Mode::NeverAnalyzed,
-            Mode::Wraparound,
-            Mode::Bloated,
-            Mode::StaleStats,
+            Mode::PreventWraparound,
+            Mode::PreventBloat,
         ]
         .iter()
         .copied()
@@ -767,19 +795,19 @@ async fn main() -> Result<()> {
         ));
     }
 
-    // Validate --analyze-threshold and --analyze-scale-factor
-    if let Some(threshold) = args.analyze_threshold
+    // Validate --vacuum-threshold and --vacuum-scale-factor
+    if let Some(threshold) = args.vacuum_threshold
         && threshold < 0
     {
         return Err(anyhow::anyhow!(
-            "--analyze-threshold ({threshold}) must be >= 0"
+            "--vacuum-threshold ({threshold}) must be >= 0"
         ));
     }
-    if let Some(factor) = args.analyze_scale_factor
+    if let Some(factor) = args.vacuum_scale_factor
         && factor < 0.0
     {
         return Err(anyhow::anyhow!(
-            "--analyze-scale-factor ({factor}) must be >= 0.0"
+            "--vacuum-scale-factor ({factor}) must be >= 0.0"
         ));
     }
 
@@ -834,6 +862,14 @@ async fn main() -> Result<()> {
     {
         return Err(anyhow::anyhow!(
             "--max-replica-lag-seconds ({threshold}) must be >= 0"
+        ));
+    }
+
+    // Validate xmin horizon check
+    if args.xmin_horizon_warn_age < 0 {
+        return Err(anyhow::anyhow!(
+            "--xmin-horizon-warn-age ({}) must be >= 0",
+            args.xmin_horizon_warn_age
         ));
     }
 
@@ -1188,6 +1224,13 @@ async fn main() -> Result<()> {
         None => None,
     };
 
+    // Check the vacuum (xmin) horizon before any phases run.
+    if !args.skip_xmin_horizon_check {
+        operations::log_initial_xmin_horizon(&client, args.xmin_horizon_warn_age, &logger)
+            .await
+            .context("Failed to check the vacuum horizon")?;
+    }
+
     // Resolve the explicit table list against the schemas and the catalog.
     let also_tables = operations::resolve_explicit_tables(&client, &also_tables, &schemas, &logger)
         .await
@@ -1199,6 +1242,7 @@ async fn main() -> Result<()> {
         dry_run: args.dry_run,
         force: args.force,
         skip_active_vacuum: args.skip_active_vacuum,
+        check_xmin_horizon: !args.skip_xmin_horizon_check,
     };
 
     let vacuum_opts = pg_maintainer::types::VacuumOptions {
@@ -1290,7 +1334,7 @@ async fn main() -> Result<()> {
     };
 
     // ── Phase 3: VACUUM FREEZE wraparound candidates ──────────────────────────
-    let freeze_summary = if enabled_modes.contains(&Mode::Wraparound) {
+    let freeze_summary = if enabled_modes.contains(&Mode::PreventWraparound) {
         logger.log(
             LogLevel::Info,
             "═══ Phase 3: VACUUM FREEZE (wraparound candidates) ═══",
@@ -1331,7 +1375,7 @@ async fn main() -> Result<()> {
     };
 
     // ── Phase 4: VACUUM bloat candidates ─────────────────────────────────────
-    let bloat_summary = if enabled_modes.contains(&Mode::Bloated) {
+    let bloat_summary = if enabled_modes.contains(&Mode::PreventBloat) {
         logger.log(LogLevel::Info, "═══ Phase 4: VACUUM (bloat) ═══");
         logger.log(
             LogLevel::Info,
@@ -1378,87 +1422,85 @@ async fn main() -> Result<()> {
         Default::default()
     };
 
-    // ── Phase 5: ANALYZE stale-stats candidates ──────────────────────────────
-    let stale_stats_summary = if enabled_modes.contains(&Mode::StaleStats) {
-        logger.log(LogLevel::Info, "═══ Phase 5: ANALYZE (stale stats) ═══");
+    // ── Phase 5: VACUUM needs-vacuum candidates ──────────────────────────────
+    let needs_vacuum_summary = if enabled_modes.contains(&Mode::NeedsVacuum) {
+        logger.log(LogLevel::Info, "═══ Phase 5: VACUUM (needs vacuum) ═══");
 
-        let (server_analyze_threshold, server_analyze_scale_factor) =
-            match operations::get_analyze_settings(&client).await {
+        let (server_vacuum_threshold, server_vacuum_scale_factor) =
+            match operations::get_vacuum_settings(&client).await {
                 Ok(v) => v,
                 Err(e) => {
                     logger.log(
                         LogLevel::Warning,
                         &format!(
-                            "Could not read autovacuum_analyze settings from server, \
+                            "Could not read autovacuum_vacuum settings from server, \
                              falling back to defaults ({}, {}): {}",
-                            pg_maintainer::config::DEFAULT_ANALYZE_THRESHOLD,
-                            pg_maintainer::config::DEFAULT_ANALYZE_SCALE_FACTOR,
+                            pg_maintainer::config::DEFAULT_VACUUM_THRESHOLD,
+                            pg_maintainer::config::DEFAULT_VACUUM_SCALE_FACTOR,
                             e
                         ),
                     );
                     (
-                        pg_maintainer::config::DEFAULT_ANALYZE_THRESHOLD,
-                        pg_maintainer::config::DEFAULT_ANALYZE_SCALE_FACTOR,
+                        pg_maintainer::config::DEFAULT_VACUUM_THRESHOLD,
+                        pg_maintainer::config::DEFAULT_VACUUM_SCALE_FACTOR,
                     )
                 }
             };
-        let effective_analyze_threshold =
-            args.analyze_threshold.unwrap_or(server_analyze_threshold);
-        let effective_analyze_scale_factor = args
-            .analyze_scale_factor
-            .unwrap_or(server_analyze_scale_factor);
+        let effective_vacuum_threshold = args.vacuum_threshold.unwrap_or(server_vacuum_threshold);
+        let effective_vacuum_scale_factor = args
+            .vacuum_scale_factor
+            .unwrap_or(server_vacuum_scale_factor);
         logger.log(
             LogLevel::Info,
             &format!(
-                "Stale-stats thresholds: analyze_threshold={effective_analyze_threshold} (server: {server_analyze_threshold}), analyze_scale_factor={effective_analyze_scale_factor} (server: {server_analyze_scale_factor})",
+                "Needs-vacuum thresholds: vacuum_threshold={effective_vacuum_threshold} (server: {server_vacuum_threshold}), vacuum_scale_factor={effective_vacuum_scale_factor} (server: {server_vacuum_scale_factor})",
             ),
         );
 
         logger.log(
             LogLevel::Info,
             &format!(
-                "Searching for stale-stats candidates (modifications > {} + {:.2}% × live rows)...",
-                effective_analyze_threshold,
-                effective_analyze_scale_factor * 100.0
+                "Searching for needs-vacuum candidates (dead tuples > {} + {:.2}% × live rows)...",
+                effective_vacuum_threshold,
+                effective_vacuum_scale_factor * 100.0
             ),
         );
-        let candidates = operations::find_stale_stats_candidates(
+        let candidates = operations::find_needs_vacuum_candidates(
             &client,
             &schemas,
             table_filter,
-            effective_analyze_threshold,
-            effective_analyze_scale_factor,
+            effective_vacuum_threshold,
+            effective_vacuum_scale_factor,
             min_bytes,
             max_bytes,
             limit_n,
             args.order_by,
         )
         .await
-        .context("Failed to query stale-stats candidates")?;
-        let summary = operations::run_stale_stats_analyze(
+        .context("Failed to query needs-vacuum candidates")?;
+        let summary = operations::run_needs_vacuum(
             &client,
             &candidates,
-            effective_analyze_threshold,
-            effective_analyze_scale_factor,
-            args.dry_run,
-            args.force,
-            args.skip_active_vacuum,
-            &already_handled,
+            effective_vacuum_threshold,
+            effective_vacuum_scale_factor,
+            run_policy,
+            &already_vacuumed,
             &logger,
             &mut shutdown_rx,
+            vacuum_opts,
             lag_gate.as_deref(),
         )
         .await
-        .context("ANALYZE STALE STATS phase failed")?;
+        .context("VACUUM NEEDS VACUUM phase failed")?;
         for t in &candidates {
             already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
-            already_analyzed.insert((t.schema_name.clone(), t.table_name.clone()));
+            already_vacuumed.insert((t.schema_name.clone(), t.table_name.clone()));
         }
         summary
     } else {
         logger.log(
             LogLevel::Info,
-            "Skipping Phase 5: ANALYZE (stale stats) (not in --mode)",
+            "Skipping Phase 5: VACUUM (needs vacuum) (not in --mode)",
         );
         Default::default()
     };
@@ -1584,7 +1626,7 @@ async fn main() -> Result<()> {
         + analyze_summary.total
         + freeze_summary.total
         + bloat_summary.total
-        + stale_stats_summary.total
+        + needs_vacuum_summary.total
         + vacuum_overdue_summary.total
         + analyze_overdue_summary.total
         + also_tables_summary.total;
@@ -1592,7 +1634,7 @@ async fn main() -> Result<()> {
         + analyze_summary.succeeded
         + freeze_summary.succeeded
         + bloat_summary.succeeded
-        + stale_stats_summary.succeeded
+        + needs_vacuum_summary.succeeded
         + vacuum_overdue_summary.succeeded
         + analyze_overdue_summary.succeeded
         + also_tables_summary.succeeded;
@@ -1600,7 +1642,7 @@ async fn main() -> Result<()> {
         + analyze_summary.failed
         + freeze_summary.failed
         + bloat_summary.failed
-        + stale_stats_summary.failed
+        + needs_vacuum_summary.failed
         + vacuum_overdue_summary.failed
         + analyze_overdue_summary.failed
         + also_tables_summary.failed;
@@ -1637,7 +1679,7 @@ async fn main() -> Result<()> {
             ),
         );
     }
-    if enabled_modes.contains(&Mode::Wraparound) {
+    if enabled_modes.contains(&Mode::PreventWraparound) {
         logger.log_always(
             LogLevel::Info,
             &format!(
@@ -1649,7 +1691,7 @@ async fn main() -> Result<()> {
             ),
         );
     }
-    if enabled_modes.contains(&Mode::Bloated) {
+    if enabled_modes.contains(&Mode::PreventBloat) {
         logger.log_always(
             LogLevel::Info,
             &format!(
@@ -1661,15 +1703,15 @@ async fn main() -> Result<()> {
             ),
         );
     }
-    if enabled_modes.contains(&Mode::StaleStats) {
+    if enabled_modes.contains(&Mode::NeedsVacuum) {
         logger.log_always(
             LogLevel::Info,
             &format!(
-                "  ANALYZE (stats) — total: {}, ok: {}, failed: {}, skipped: {}",
-                stale_stats_summary.total,
-                stale_stats_summary.succeeded,
-                stale_stats_summary.failed,
-                stale_stats_summary.skipped
+                "  VACUUM (needs-vacuum) — total: {}, ok: {}, failed: {}, skipped: {}",
+                needs_vacuum_summary.total,
+                needs_vacuum_summary.succeeded,
+                needs_vacuum_summary.failed,
+                needs_vacuum_summary.skipped
             ),
         );
     }

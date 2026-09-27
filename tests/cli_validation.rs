@@ -145,19 +145,19 @@ fn test_mode_multiple_comma_separated() {
         .arg("--schema")
         .arg("public")
         .arg("--mode")
-        .arg("never-vacuumed,never-analyzed,wraparound")
+        .arg("never-vacuumed,never-analyzed,prevent-wraparound")
         .env_clear()
         .assert()
         .stderr(predicate::str::contains("Invalid mode").not());
 }
 
 #[test]
-fn test_mode_all_five() {
+fn test_mode_all_four() {
     cmd()
         .arg("--schema")
         .arg("public")
         .arg("--mode")
-        .arg("never-vacuumed,never-analyzed,wraparound,bloated,stale-stats")
+        .arg("never-vacuumed,never-analyzed,prevent-wraparound,prevent-bloat")
         .env_clear()
         .assert()
         .stderr(predicate::str::contains("Invalid mode").not());
@@ -182,10 +182,61 @@ fn test_mode_case_insensitive() {
         .arg("--schema")
         .arg("public")
         .arg("--mode")
-        .arg("NEVER-VACUUMED,Never-Analyzed,WRAPAROUND,bloated")
+        .arg("NEVER-VACUUMED,Never-Analyzed,PREVENT-WRAPAROUND,prevent-bloat")
         .env_clear()
         .assert()
         .stderr(predicate::str::contains("Invalid mode").not());
+}
+
+#[test]
+fn test_mode_old_name_wraparound_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("wraparound")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid mode"));
+}
+
+#[test]
+fn test_mode_old_name_bloated_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("bloated")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid mode"));
+}
+
+#[test]
+fn test_mode_old_name_stale_stats_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("stale-stats")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Invalid mode"));
+}
+
+#[test]
+fn test_mode_needs_vacuum() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("needs-vacuum")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
 }
 
 #[test]
@@ -1609,7 +1660,7 @@ fn test_also_tables_composes_with_mode() {
         .arg("--schema")
         .arg("public")
         .arg("--mode")
-        .arg("bloated")
+        .arg("prevent-bloat")
         .arg("--also-tables")
         .arg("public.orders")
         .env_clear()
@@ -1667,4 +1718,78 @@ also-tables = ["orders"]
         .assert()
         .failure()
         .stderr(predicate::str::contains("schema-qualified"));
+}
+
+// ── Xmin horizon check ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_skip_xmin_horizon_check_flag() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--skip-xmin-horizon-check")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_xmin_horizon_warn_age_valid() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--xmin-horizon-warn-age")
+        .arg("500000")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_xmin_horizon_warn_age_zero() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--xmin-horizon-warn-age")
+        .arg("0")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_xmin_horizon_warn_age_negative_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--xmin-horizon-warn-age")
+        .arg("-1")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(
+            predicate::str::contains("unexpected argument")
+                .or(predicate::str::contains("must be >= 0")),
+        );
+}
+
+#[test]
+fn test_xmin_horizon_check_in_config_file() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+skip-xmin-horizon-check = false
+xmin-horizon-warn-age = 1000000
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
 }

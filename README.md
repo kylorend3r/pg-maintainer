@@ -36,13 +36,32 @@ A single-threaded PostgreSQL table maintenance tool written in Rust. It runs fiv
 |---|---|---|---|
 | 1 | `never-vacuumed` | `VACUUM (VERBOSE)` | Tables where neither manual nor autovacuum has ever run |
 | 2 | `never-analyzed` | `ANALYZE` | Tables where neither manual nor autoanalyze has ever run |
-| 3 | `wraparound` | `VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE)` | Tables whose XID age exceeds the wraparound threshold |
-| 4 | `bloated` | `VACUUM (VERBOSE)` | Tables with excessive dead tuples (bloat > threshold, default 80%) |
-| 5 | `stale-stats` | `ANALYZE` | Tables where modifications since last analyze exceed configured threshold |
+| 3 | `prevent-wraparound` | `VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE)` | Tables whose XID age exceeds the wraparound threshold |
+| 4 | `prevent-bloat` | `VACUUM (VERBOSE)` | Tables with excessive dead tuples (bloat > threshold, default 80%) |
+| 5 | `needs-vacuum` (opt-in) | `VACUUM (VERBOSE)` | Tables where dead tuples exceed the autovacuum threshold formula |
 | 6 | `vacuum-overdue` (opt-in) | `VACUUM (VERBOSE)` | Tables not vacuumed in N days (requires `--vacuum-older-than-days`) |
 | 7 | `analyze-overdue` (opt-in) | `ANALYZE` | Tables not analyzed in M days (requires `--analyze-older-than-days`) |
 
-Modes 1–5 run by default in sequence on a single connection; modes 6–7 are opt-in. Partitioned parent tables (declarative partitioning) are automatically excluded from discovery — their partitions are maintained individually. Select individual modes with `--mode`; a table matched by an earlier mode in the same run is not reprocessed by a later mode.
+Modes 1–4 run by default in sequence on a single connection; modes 5–7 are opt-in. Partitioned parent tables (declarative partitioning) are automatically excluded from discovery — their partitions are maintained individually. Select individual modes with `--mode`; a table matched by an earlier mode in the same run is not reprocessed by a later mode.
+
+### Vacuum-Horizon Diagnostics
+
+VACUUM can only reclaim dead tuples older than every transaction that might still need them — that boundary is the xmin horizon. If something pins the horizon back (a long-running transaction, an inactive replication slot, or an unresolved prepared transaction), VACUUM reports "0 dead tuples removed" even on heavily bloated tables.
+
+Before any phases run, pg-maintainer checks for horizon blockers and logs them:
+
+```
+[INFO] Vacuum horizon check: no long-running transactions, slots, or prepared transactions found.
+[WARNING] Vacuum horizon may be pinned: backend PID 1822 (app_worker), idle in transaction 6h12m (oldest XID age: 2,547,821)
+```
+
+Per-table, when VACUUM removes 0 dead tuples, the log enriches the "0 removed" warning with the actual blocker:
+
+```
+[WARNING] VACUUM on "public"."huge_table" removed 0 dead tuples — blocked by: replication slot 'logical_slot' (logical, active: f), XID age 2.5M
+```
+
+Use `--skip-xmin-horizon-check` to disable the check entirely, or `--xmin-horizon-warn-age` to tune the threshold above which horizon blockers are logged as a warning (default: 1M XIDs).
 
 ## Installation
 
@@ -93,7 +112,7 @@ spec:
     args:
     - --discover-all-schemas
     - --mode
-    - never-vacuumed,never-analyzed,wraparound
+    - never-vacuumed,never-analyzed,prevent-wraparound
   volumes:
   - name: pg-secret
     secret:
@@ -114,7 +133,7 @@ pg-maintainer -d mydb --discover-all-schemas
 pg-maintainer -d mydb -s public,analytics
 
 # Run only specific modes
-pg-maintainer -d mydb -s public --mode never-vacuumed,bloated
+pg-maintainer -d mydb -s public --mode never-vacuumed,prevent-bloat
 
 # Opt-in time-based maintenance
 pg-maintainer -d mydb -s public --mode vacuum-overdue,analyze-overdue \
@@ -169,7 +188,7 @@ password = "${PG_PASSWORD}"   # env-var interpolation supported
 
 discover-all-schemas = true
 dry-run = false
-mode = "vacuum,analyze,freeze,bloat"   # default when omitted: all four
+mode = "never-vacuumed,never-analyzed,prevent-wraparound,prevent-bloat"   # default when omitted: all four
 maintenance-work-mem-gb = 2
 ```
 

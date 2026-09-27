@@ -10,8 +10,9 @@ use pg_maintainer::dsn::{self, ParsedDsn};
 use pg_maintainer::logging::rotated_log_path;
 use pg_maintainer::queries;
 use pg_maintainer::types::{
-    BloatTableInfo, ExplicitTable, FreezeTableInfo, LagObservation, LogFormat, LogRotation, Mode,
-    OperationSummary, OrderBy, ReplicaLagGate, SslMode, StandbyLag, TableInfo, ThrottleSettings,
+    BloatTableInfo, ExplicitTable, FreezeTableInfo, HorizonObservation, LagObservation, LogFormat,
+    LogRotation, Mode, OperationSummary, OrderBy, ReplicaLagGate, SslMode, StandbyLag, TableInfo,
+    ThrottleSettings, XminHorizonBlocker,
 };
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -354,8 +355,8 @@ fn test_partition_excluding_queries_all_filter_relkind_p() {
             "FIND_BLOAT_CANDIDATES_TABLE",
             queries::FIND_BLOAT_CANDIDATES_TABLE,
         ),
-        ("FIND_STALE_STATS", queries::FIND_STALE_STATS),
-        ("FIND_STALE_STATS_TABLE", queries::FIND_STALE_STATS_TABLE),
+        ("FIND_NEEDS_VACUUM", queries::FIND_NEEDS_VACUUM),
+        ("FIND_NEEDS_VACUUM_TABLE", queries::FIND_NEEDS_VACUUM_TABLE),
     ];
     for (name, sql) in &queries_to_check {
         assert!(
@@ -377,9 +378,12 @@ fn test_mode_from_str_all_variants() {
         "never-analyzed".parse::<Mode>().unwrap(),
         Mode::NeverAnalyzed
     );
-    assert_eq!("wraparound".parse::<Mode>().unwrap(), Mode::Wraparound);
-    assert_eq!("bloated".parse::<Mode>().unwrap(), Mode::Bloated);
-    assert_eq!("stale-stats".parse::<Mode>().unwrap(), Mode::StaleStats);
+    assert_eq!(
+        "prevent-wraparound".parse::<Mode>().unwrap(),
+        Mode::PreventWraparound
+    );
+    assert_eq!("prevent-bloat".parse::<Mode>().unwrap(), Mode::PreventBloat);
+    assert_eq!("needs-vacuum".parse::<Mode>().unwrap(), Mode::NeedsVacuum);
     assert_eq!(
         "vacuum-overdue".parse::<Mode>().unwrap(),
         Mode::VacuumOverdue
@@ -400,8 +404,11 @@ fn test_mode_from_str_case_insensitive() {
         "Never-Analyzed".parse::<Mode>().unwrap(),
         Mode::NeverAnalyzed
     );
-    assert_eq!("WRAPAROUND".parse::<Mode>().unwrap(), Mode::Wraparound);
-    assert_eq!("Bloated".parse::<Mode>().unwrap(), Mode::Bloated);
+    assert_eq!(
+        "PREVENT-WRAPAROUND".parse::<Mode>().unwrap(),
+        Mode::PreventWraparound
+    );
+    assert_eq!("Prevent-Bloat".parse::<Mode>().unwrap(), Mode::PreventBloat);
 }
 
 #[test]
@@ -410,15 +417,18 @@ fn test_mode_from_str_invalid() {
     assert!("".parse::<Mode>().is_err());
     assert!("vac".parse::<Mode>().is_err());
     assert!("vacuum".parse::<Mode>().is_err()); // old names no longer accepted
+    assert!("wraparound".parse::<Mode>().is_err());
+    assert!("bloated".parse::<Mode>().is_err());
+    assert!("stale-stats".parse::<Mode>().is_err());
 }
 
 #[test]
 fn test_mode_display() {
     assert_eq!(Mode::NeverVacuumed.to_string(), "never-vacuumed");
     assert_eq!(Mode::NeverAnalyzed.to_string(), "never-analyzed");
-    assert_eq!(Mode::Wraparound.to_string(), "wraparound");
-    assert_eq!(Mode::Bloated.to_string(), "bloated");
-    assert_eq!(Mode::StaleStats.to_string(), "stale-stats");
+    assert_eq!(Mode::PreventWraparound.to_string(), "prevent-wraparound");
+    assert_eq!(Mode::PreventBloat.to_string(), "prevent-bloat");
+    assert_eq!(Mode::NeedsVacuum.to_string(), "needs-vacuum");
     assert_eq!(Mode::VacuumOverdue.to_string(), "vacuum-overdue");
     assert_eq!(Mode::AnalyzeOverdue.to_string(), "analyze-overdue");
 }
@@ -547,7 +557,7 @@ fn test_order_by_size_variants_order_by_size_bytes_desc() {
         queries::FIND_NEVER_ANALYZED_BY_SIZE,
         queries::FIND_WRAPAROUND_CANDIDATES_BY_SIZE,
         queries::FIND_BLOAT_CANDIDATES_BY_SIZE,
-        queries::FIND_STALE_STATS_BY_SIZE,
+        queries::FIND_NEEDS_VACUUM_BY_SIZE,
     ];
     for q in queries_to_check {
         assert!(
@@ -572,7 +582,7 @@ fn test_order_by_last_maintained_variants_order_by_nulls_first() {
         queries::FIND_NEVER_ANALYZED_BY_LAST_MAINTAINED,
         queries::FIND_WRAPAROUND_CANDIDATES_BY_LAST_MAINTAINED,
         queries::FIND_BLOAT_CANDIDATES_BY_LAST_MAINTAINED,
-        queries::FIND_STALE_STATS_BY_LAST_MAINTAINED,
+        queries::FIND_NEEDS_VACUUM_BY_LAST_MAINTAINED,
     ];
     for q in queries_to_check {
         assert!(
@@ -596,12 +606,12 @@ fn test_default_severity_queries_also_return_size_and_last_maintained() {
         queries::FIND_NEVER_ANALYZED,
         queries::FIND_WRAPAROUND_CANDIDATES,
         queries::FIND_BLOAT_CANDIDATES,
-        queries::FIND_STALE_STATS,
+        queries::FIND_NEEDS_VACUUM,
         queries::FIND_NEVER_VACUUMED_TABLE,
         queries::FIND_NEVER_ANALYZED_TABLE,
         queries::FIND_WRAPAROUND_CANDIDATES_TABLE,
         queries::FIND_BLOAT_CANDIDATES_TABLE,
-        queries::FIND_STALE_STATS_TABLE,
+        queries::FIND_NEEDS_VACUUM_TABLE,
     ];
     for q in queries_to_check {
         assert!(q.contains("AS size_bytes"), "must select size_bytes: {q}");
@@ -1416,5 +1426,88 @@ fn test_explicit_tables_query_pairs_arrays_and_allows_matviews() {
     assert!(
         queries::FIND_EXPLICIT_TABLES.contains("'r', 'm', 'p'"),
         "FIND_EXPLICIT_TABLES must accept tables, matviews and partitioned parents"
+    );
+}
+
+// ── Xmin Horizon diagnostics ──────────────────────────────────────────────────
+
+#[test]
+fn test_xmin_horizon_blocker_construction() {
+    let blocker = XminHorizonBlocker {
+        holder_type: "backend".to_string(),
+        identifier: "1234".to_string(),
+        detail: Some("app_worker".to_string()),
+        status: Some("running".to_string()),
+        xid_age: 2_500_000,
+        xact_duration: Some(std::time::Duration::from_secs(3600)),
+        query_duration: Some(std::time::Duration::from_secs(1800)),
+        query_snippet: Some("SELECT * FROM huge_table".to_string()),
+    };
+
+    assert_eq!(blocker.holder_type, "backend");
+    assert_eq!(blocker.identifier, "1234");
+    assert_eq!(blocker.xid_age, 2_500_000);
+}
+
+#[test]
+fn test_horizon_observation_variants() {
+    let blocker = XminHorizonBlocker {
+        holder_type: "replication_slot".to_string(),
+        identifier: "slot1".to_string(),
+        detail: Some("logical".to_string()),
+        status: Some("false".to_string()),
+        xid_age: 1_000_000,
+        xact_duration: None,
+        query_duration: None,
+        query_snippet: None,
+    };
+
+    let observed = HorizonObservation::Observed(vec![blocker]);
+    match &observed {
+        HorizonObservation::Observed(blockers) => {
+            assert_eq!(blockers.len(), 1);
+            assert_eq!(blockers[0].identifier, "slot1");
+        }
+        HorizonObservation::Unobservable => panic!("should be Observed"),
+    }
+
+    let unobservable = HorizonObservation::Unobservable;
+    assert_eq!(unobservable, HorizonObservation::Unobservable);
+}
+
+#[test]
+fn test_xmin_horizon_blockers_query_structure() {
+    let q = queries::FIND_XMIN_HORIZON_BLOCKERS;
+    assert!(
+        q.contains("'backend'::text"),
+        "query must include backend holder type"
+    );
+    assert!(
+        q.contains("'replication_slot'"),
+        "query must include replication_slot holder type"
+    );
+    assert!(
+        q.contains("'prepared_xact'"),
+        "query must include prepared_xact holder type"
+    );
+    assert!(
+        q.contains("UNION ALL"),
+        "query must use UNION ALL for three blocker types"
+    );
+    assert!(
+        q.contains("ORDER BY xid_age DESC"),
+        "query must order by xid_age descending"
+    );
+    assert!(
+        q.contains("age(backend_xmin)"),
+        "query must compute XID age from backend_xmin"
+    );
+}
+
+#[test]
+fn test_xmin_privilege_probe_checks_pg_read_all_stats() {
+    assert!(
+        queries::GET_CAN_READ_ACTIVITY_XMIN.contains("pg_read_all_stats"),
+        "the xmin probe must test pg_read_all_stats membership"
     );
 }

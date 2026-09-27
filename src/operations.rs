@@ -1,8 +1,9 @@
 use crate::logging::{LogContext, LogLevel, Logger};
 use crate::queries;
 use crate::types::{
-    BloatTableInfo, ExplicitTable, FreezeTableInfo, LagGateVerdict, LagObservation,
-    OperationSummary, OrderBy, ReplicaLagGate, RunPolicy, StandbyLag, TableInfo, VacuumOptions,
+    BloatTableInfo, ExplicitTable, FreezeTableInfo, HorizonObservation, LagGateVerdict,
+    LagObservation, OperationSummary, OrderBy, ReplicaLagGate, RunPolicy, StandbyLag, TableInfo,
+    VacuumOptions, XminHorizonBlocker,
 };
 use crate::vacuum_output;
 use anyhow::Result;
@@ -318,78 +319,78 @@ pub async fn get_freeze_max_age(client: &Client) -> Result<i64> {
     Ok(row.get::<_, i64>(0))
 }
 
-/// Returns the server's autovacuum_analyze_threshold and autovacuum_analyze_scale_factor
+/// Returns the server's autovacuum_vacuum_threshold and autovacuum_vacuum_scale_factor
 /// as configured on the connected server.
-pub async fn get_analyze_settings(client: &Client) -> Result<(i64, f64)> {
+pub async fn get_vacuum_settings(client: &Client) -> Result<(i64, f64)> {
     let row = client
-        .query_one(queries::GET_ANALYZE_SETTINGS, &[])
+        .query_one(queries::GET_VACUUM_SETTINGS, &[])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to read autovacuum_analyze settings: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("Failed to read autovacuum_vacuum settings: {e}"))?;
     Ok((
-        row.get::<_, i64>("analyze_threshold"),
-        row.get::<_, f64>("analyze_scale_factor"),
+        row.get::<_, i64>("vacuum_threshold"),
+        row.get::<_, f64>("vacuum_scale_factor"),
     ))
 }
 
-/// Returns tables where modifications since the last analyze exceed the threshold.
+/// Returns tables where dead tuples exceed the vacuum threshold formula.
 /// If `table` is Some, only that table is checked.
 #[allow(clippy::too_many_arguments)]
-pub async fn find_stale_stats_candidates(
+pub async fn find_needs_vacuum_candidates(
     client: &Client,
     schemas: &[String],
     table: Option<&str>,
-    analyze_threshold: i64,
-    analyze_scale_factor: f64,
+    vacuum_threshold: i64,
+    vacuum_scale_factor: f64,
     min_bytes: i64,
     max_bytes: i64,
     limit: i64,
     order_by: Option<OrderBy>,
-) -> Result<Vec<crate::types::StaleStatsTableInfo>> {
+) -> Result<Vec<crate::types::NeedsVacuumTableInfo>> {
     let schemas_vec: Vec<String> = schemas.to_vec();
     let rows = if let Some(tbl) = table {
         client
             .query(
-                queries::FIND_STALE_STATS_TABLE,
+                queries::FIND_NEEDS_VACUUM_TABLE,
                 &[
                     &schemas_vec,
                     &tbl,
-                    &analyze_threshold,
-                    &analyze_scale_factor,
+                    &vacuum_threshold,
+                    &vacuum_scale_factor,
                     &min_bytes,
                     &max_bytes,
                 ],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query stale-stats candidates: {e}"))?
+            .map_err(|e| anyhow::anyhow!("Failed to query needs-vacuum candidates: {e}"))?
     } else {
         let query = match order_by {
-            None => queries::FIND_STALE_STATS,
-            Some(OrderBy::Size) => queries::FIND_STALE_STATS_BY_SIZE,
-            Some(OrderBy::LastMaintained) => queries::FIND_STALE_STATS_BY_LAST_MAINTAINED,
+            None => queries::FIND_NEEDS_VACUUM,
+            Some(OrderBy::Size) => queries::FIND_NEEDS_VACUUM_BY_SIZE,
+            Some(OrderBy::LastMaintained) => queries::FIND_NEEDS_VACUUM_BY_LAST_MAINTAINED,
         };
         client
             .query(
                 query,
                 &[
                     &schemas_vec,
-                    &analyze_threshold,
-                    &analyze_scale_factor,
+                    &vacuum_threshold,
+                    &vacuum_scale_factor,
                     &min_bytes,
                     &max_bytes,
                     &limit,
                 ],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query stale-stats candidates: {e}"))?
+            .map_err(|e| anyhow::anyhow!("Failed to query needs-vacuum candidates: {e}"))?
     };
 
     Ok(rows
         .into_iter()
-        .map(|row| crate::types::StaleStatsTableInfo {
+        .map(|row| crate::types::NeedsVacuumTableInfo {
             schema_name: row.get("schemaname"),
             table_name: row.get("tablename"),
             n_live_tup: row.get("n_live_tup"),
-            n_mod_since_analyze: row.get("n_mod_since_analyze"),
+            n_dead_tup: row.get("n_dead_tup"),
             size_bytes: row.get("size_bytes"),
             last_maintained: row.get("last_maintained"),
         })
@@ -781,6 +782,7 @@ const OP_VACUUM: &str = "VACUUM";
 const OP_ANALYZE: &str = "ANALYZE";
 const OP_FREEZE: &str = "VACUUM FREEZE";
 const OP_BLOAT: &str = "VACUUM (BLOAT)";
+const OP_NEEDS_VACUUM: &str = "VACUUM (NEEDS VACUUM)";
 const OP_VACUUM_OVERDUE: &str = "VACUUM (OVERDUE)";
 const OP_ANALYZE_OVERDUE: &str = "ANALYZE (OVERDUE)";
 const BACKEND_TYPE_AUTOVACUUM_WORKER: &str = "autovacuum worker";
@@ -991,6 +993,7 @@ pub async fn run_analyze_never_analyzed(
         dry_run,
         force,
         skip_active_vacuum,
+        check_xmin_horizon: false,
     };
 
     for (i, t) in tables.iter().enumerate() {
@@ -1275,7 +1278,7 @@ pub async fn run_freeze_wraparound(
                         schema: &t.schema_name,
                         table: &t.table_name,
                         operation: "FREEZE",
-                        mode: "wraparound",
+                        mode: "prevent-wraparound",
                         status: "success",
                         dead_tuples_before: result.dead_tuples_before,
                         dead_tuples_removed: result.dead_tuples_removed,
@@ -1311,7 +1314,7 @@ pub async fn run_freeze_wraparound(
                             schema: &t.schema_name,
                             table: &t.table_name,
                             operation: "FREEZE",
-                            mode: "wraparound",
+                            mode: "prevent-wraparound",
                             status: "error",
                             dead_tuples_before: None,
                             dead_tuples_removed: None,
@@ -1440,13 +1443,20 @@ pub async fn run_bloat_vacuum(
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_BLOAT, start.elapsed());
                 if let Some(0) = result.dead_tuples_removed {
-                    logger.log(
-                        LogLevel::Warning,
-                        &format!(
-                            "VACUUM on \"{}\".\"{}\" removed 0 dead tuples — table may not have needed vacuuming, or another process already cleaned it up",
-                            t.schema_name, t.table_name
-                        ),
+                    let mut msg = format!(
+                        "VACUUM on \"{}\".\"{}\" removed 0 dead tuples",
+                        t.schema_name, t.table_name
                     );
+                    if policy.check_xmin_horizon {
+                        if let Ok(Some(blocker_desc)) = describe_worst_xmin_blocker(client).await {
+                            msg.push_str(&format!(" — blocked by: {}", blocker_desc));
+                        } else {
+                            msg.push_str(" — table may not have needed vacuuming, or another process already cleaned it up");
+                        }
+                    } else {
+                        msg.push_str(" — table may not have needed vacuuming, or another process already cleaned it up");
+                    }
+                    logger.log(LogLevel::Warning, &msg);
                 } else if let Some(n) = result.dead_tuples_removed {
                     logger.log(
                         LogLevel::Info,
@@ -1463,7 +1473,7 @@ pub async fn run_bloat_vacuum(
                         schema: &t.schema_name,
                         table: &t.table_name,
                         operation: "VACUUM",
-                        mode: "bloated",
+                        mode: "prevent-bloat",
                         status: "success",
                         dead_tuples_before: result.dead_tuples_before,
                         dead_tuples_removed: result.dead_tuples_removed,
@@ -1499,7 +1509,7 @@ pub async fn run_bloat_vacuum(
                             schema: &t.schema_name,
                             table: &t.table_name,
                             operation: "VACUUM",
-                            mode: "bloated",
+                            mode: "prevent-bloat",
                             status: "error",
                             dead_tuples_before: None,
                             dead_tuples_removed: None,
@@ -1517,23 +1527,19 @@ pub async fn run_bloat_vacuum(
     Ok(summary)
 }
 
-/// Run ANALYZE on all tables with stale statistics.
-/// If `table` is Some, only that table is checked and (if eligible) analyzed.
-/// If `force` is true, active vacuums on the table are terminated before starting.
-/// Otherwise tables with an active manual VACUUM are skipped (autovacuum is always terminated).
-/// Tables already analyzed by earlier phases are skipped (tracked in `already_handled`).
+/// Run VACUUM on all tables where dead tuples exceed the threshold formula.
+/// Tables already vacuumed by earlier phases are skipped (tracked in `already_vacuumed`).
 #[allow(clippy::too_many_arguments)]
-pub async fn run_stale_stats_analyze(
+pub async fn run_needs_vacuum(
     client: &Client,
-    tables: &[crate::types::StaleStatsTableInfo],
-    analyze_threshold: i64,
-    analyze_scale_factor: f64,
-    dry_run: bool,
-    force: bool,
-    skip_active_vacuum: bool,
-    already_handled: &std::collections::HashSet<(String, String)>,
+    tables: &[crate::types::NeedsVacuumTableInfo],
+    vacuum_threshold: i64,
+    vacuum_scale_factor: f64,
+    policy: RunPolicy,
+    already_vacuumed: &std::collections::HashSet<(String, String)>,
     logger: &Arc<Logger>,
     shutdown_rx: &mut watch::Receiver<bool>,
+    vacuum_opts: VacuumOptions,
     lag_gate: Option<&ReplicaLagGate>,
 ) -> Result<OperationSummary> {
     let mut summary = OperationSummary {
@@ -1542,20 +1548,14 @@ pub async fn run_stale_stats_analyze(
     };
 
     if tables.is_empty() {
-        logger.log(LogLevel::Success, "No stale-stats candidates found.");
+        logger.log(LogLevel::Success, "No needs-vacuum candidates found.");
         return Ok(summary);
     }
 
     logger.log(
         LogLevel::Info,
-        &format!("Found {} stale-stats candidate(s).", tables.len()),
+        &format!("Found {} needs-vacuum candidate(s).", tables.len()),
     );
-
-    let policy = RunPolicy {
-        dry_run,
-        force,
-        skip_active_vacuum,
-    };
 
     for (i, t) in tables.iter().enumerate() {
         // Check if shutdown was requested
@@ -1567,7 +1567,7 @@ pub async fn run_stale_stats_analyze(
             break;
         }
 
-        if already_handled.contains(&(t.schema_name.clone(), t.table_name.clone())) {
+        if already_vacuumed.contains(&(t.schema_name.clone(), t.table_name.clone())) {
             logger.log(
                 LogLevel::Info,
                 &format!(
@@ -1614,14 +1614,13 @@ pub async fn run_stale_stats_analyze(
             continue;
         }
 
-        if dry_run {
-            let effective_threshold =
-                t.effective_threshold(analyze_threshold, analyze_scale_factor);
+        if policy.dry_run {
+            let effective_threshold = t.effective_threshold(vacuum_threshold, vacuum_scale_factor);
             logger.log(
                 LogLevel::Info,
                 &format!(
-                    "[DRY RUN] Would run: ANALYZE \"{}\".\"{}\"  (mods={}, threshold={})",
-                    t.schema_name, t.table_name, t.n_mod_since_analyze, effective_threshold
+                    "[DRY RUN] Would run: VACUUM (VERBOSE) \"{}\".\"{}\"  (dead_tup={}, threshold={})",
+                    t.schema_name, t.table_name, t.n_dead_tup, effective_threshold
                 ),
             );
             continue;
@@ -1632,26 +1631,50 @@ pub async fn run_stale_stats_analyze(
             tables.len(),
             &t.schema_name,
             &t.table_name,
-            "ANALYZE (STALE STATS)",
+            OP_NEEDS_VACUUM,
         );
         let start = Instant::now();
-        match analyze_table(client, &t.schema_name, &t.table_name).await {
+        match vacuum_table(client, &t.schema_name, &t.table_name, vacuum_opts).await {
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(
                     &t.schema_name,
                     &t.table_name,
-                    "ANALYZE (STALE STATS)",
+                    OP_NEEDS_VACUUM,
                     start.elapsed(),
                 );
+                if let Some(0) = result.dead_tuples_removed {
+                    let mut msg = format!(
+                        "VACUUM on \"{}\".\"{}\" removed 0 dead tuples",
+                        t.schema_name, t.table_name
+                    );
+                    if policy.check_xmin_horizon {
+                        if let Ok(Some(blocker_desc)) = describe_worst_xmin_blocker(client).await {
+                            msg.push_str(&format!(" — blocked by: {}", blocker_desc));
+                        } else {
+                            msg.push_str(" — table may not have needed vacuuming, or another process already cleaned it up");
+                        }
+                    } else {
+                        msg.push_str(" — table may not have needed vacuuming, or another process already cleaned it up");
+                    }
+                    logger.log(LogLevel::Warning, &msg);
+                } else if let Some(n) = result.dead_tuples_removed {
+                    logger.log(
+                        LogLevel::Info,
+                        &format!(
+                            "VACUUM on \"{}\".\"{}\" removed {n} dead tuple(s)",
+                            t.schema_name, t.table_name
+                        ),
+                    );
+                }
                 log_maintenance_operation(
                     client,
-                    dry_run,
+                    policy.dry_run,
                     LogEntry {
                         schema: &t.schema_name,
                         table: &t.table_name,
-                        operation: "ANALYZE",
-                        mode: "stale-stats",
+                        operation: "VACUUM",
+                        mode: "needs-vacuum",
                         status: "success",
                         dead_tuples_before: result.dead_tuples_before,
                         dead_tuples_removed: result.dead_tuples_removed,
@@ -1677,17 +1700,17 @@ pub async fn run_stale_stats_analyze(
                     logger.log_table_failed(
                         &t.schema_name,
                         &t.table_name,
-                        "ANALYZE (STALE STATS)",
+                        OP_NEEDS_VACUUM,
                         &e.to_string(),
                     );
                     log_maintenance_operation(
                         client,
-                        dry_run,
+                        policy.dry_run,
                         LogEntry {
                             schema: &t.schema_name,
                             table: &t.table_name,
-                            operation: "ANALYZE",
-                            mode: "stale-stats",
+                            operation: "VACUUM",
+                            mode: "needs-vacuum",
                             status: "error",
                             dead_tuples_before: None,
                             dead_tuples_removed: None,
@@ -2320,6 +2343,182 @@ pub async fn log_initial_replica_lag(
         }
     }
     Ok(())
+}
+
+/// Probe the cluster for transactions/processes holding back the vacuum (xmin) horizon.
+pub async fn observe_xmin_horizon(client: &Client) -> Result<HorizonObservation> {
+    let can_read: bool = client
+        .query_one(queries::GET_CAN_READ_ACTIVITY_XMIN, &[])
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to check activity/xmin privileges: {e}"))?
+        .get("can_read");
+
+    if !can_read {
+        return Ok(HorizonObservation::Unobservable);
+    }
+
+    let rows = client
+        .query(queries::FIND_XMIN_HORIZON_BLOCKERS, &[])
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read xmin horizon blockers: {e}"))?;
+
+    Ok(HorizonObservation::Observed(
+        rows.into_iter()
+            .map(|row| {
+                let xact_secs: Option<i64> = row.get("xact_duration_secs");
+                let query_secs: Option<i64> = row.get("query_duration_secs");
+                XminHorizonBlocker {
+                    holder_type: row.get("holder_type"),
+                    identifier: row.get("identifier"),
+                    detail: row.get("detail"),
+                    status: row.get("status"),
+                    xid_age: row.get("xid_age"),
+                    xact_duration: xact_secs.map(|s| std::time::Duration::from_secs(s as u64)),
+                    query_duration: query_secs.map(|s| std::time::Duration::from_secs(s as u64)),
+                    query_snippet: row.get("query_snippet"),
+                }
+            })
+            .collect(),
+    ))
+}
+
+/// Format a single xmin horizon blocker for a log line.
+fn describe_xmin_blocker(b: &XminHorizonBlocker) -> String {
+    match b.holder_type.as_str() {
+        "backend" => {
+            let detail = b.detail.as_deref().unwrap_or("<unknown>");
+            let status = b.status.as_deref().unwrap_or("unknown");
+            match (b.xact_duration, b.query_duration) {
+                (Some(xact_dur), Some(query_dur)) => {
+                    let query_text = b.query_snippet.as_deref().unwrap_or("");
+                    let xact_str = format_duration(xact_dur);
+                    let query_str = format_duration(query_dur);
+                    if status == "idle" {
+                        format!(
+                            "backend PID {} ({}), idle in transaction {} (last query {} ago)",
+                            b.identifier, detail, xact_str, query_str
+                        )
+                    } else {
+                        format!(
+                            "backend PID {} ({}), running for {}: {}",
+                            b.identifier, detail, xact_str, query_text
+                        )
+                    }
+                }
+                (Some(xact_dur), None) => {
+                    let xact_str = format_duration(xact_dur);
+                    format!(
+                        "backend PID {} ({}), transaction open for {}",
+                        b.identifier, detail, xact_str
+                    )
+                }
+                _ => format!("backend PID {}", b.identifier),
+            }
+        }
+        "replication_slot" => {
+            let slot_type = b.detail.as_deref().unwrap_or("unknown");
+            let active = b.status.as_deref().unwrap_or("unknown");
+            let age_str = format_xid_age(b.xid_age);
+            format!(
+                "replication slot '{}' ({}, active: {}), XID age {}",
+                b.identifier, slot_type, active, age_str
+            )
+        }
+        "prepared_xact" => {
+            let owner = b.detail.as_deref().unwrap_or("unknown");
+            let age_str = format_xid_age(b.xid_age);
+            format!(
+                "prepared transaction '{}' (owner: {}), XID age {}",
+                b.identifier, owner, age_str
+            )
+        }
+        _ => format!("{} {}", b.holder_type, b.identifier),
+    }
+}
+
+/// Format an XID age for human readability.
+fn format_xid_age(age: i64) -> String {
+    format!("{} XIDs", age)
+}
+
+/// Format a duration for human readability.
+fn format_duration(d: std::time::Duration) -> String {
+    let total_secs = d.as_secs();
+    let hours = total_secs / 3600;
+    let minutes = (total_secs % 3600) / 60;
+    let secs = total_secs % 60;
+    if hours > 0 {
+        format!("{}h{:02}m{:02}s", hours, minutes, secs)
+    } else if minutes > 0 {
+        format!("{}m{:02}s", minutes, secs)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+/// Log the initial vacuum-horizon observation before any phases run.
+pub async fn log_initial_xmin_horizon(
+    client: &Client,
+    warn_age_threshold: i64,
+    logger: &Arc<Logger>,
+) -> Result<()> {
+    match observe_xmin_horizon(client).await? {
+        HorizonObservation::Unobservable => {
+            logger.log(
+                LogLevel::Warning,
+                "Cannot check the vacuum horizon — the connected role lacks pg_read_all_stats \
+                 (granted by pg_monitor). Horizon diagnostics are disabled for this run.",
+            );
+        }
+        HorizonObservation::Observed(blockers) => {
+            if blockers.is_empty() {
+                logger.log(
+                    LogLevel::Info,
+                    "Vacuum horizon check: no long-running transactions, slots, or prepared \
+                     transactions found.",
+                );
+            } else {
+                let worst = &blockers[0];
+                if worst.xid_age >= warn_age_threshold {
+                    let described = blockers
+                        .iter()
+                        .take(3)
+                        .map(describe_xmin_blocker)
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    logger.log(
+                        LogLevel::Warning,
+                        &format!(
+                            "Vacuum horizon may be pinned: {} (oldest XID age: {})",
+                            described, worst.xid_age
+                        ),
+                    );
+                } else {
+                    let age_str = format_xid_age(worst.xid_age);
+                    logger.log(
+                        LogLevel::Info,
+                        &format!("Vacuum horizon is healthy (oldest XID age: {})", age_str),
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Check the vacuum horizon and return a description of the worst blocker, if any.
+/// Used to enrich the "0 dead tuples removed" warning per-table.
+pub async fn describe_worst_xmin_blocker(client: &Client) -> Result<Option<String>> {
+    match observe_xmin_horizon(client).await? {
+        HorizonObservation::Unobservable => Ok(None),
+        HorizonObservation::Observed(blockers) => {
+            if blockers.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(describe_xmin_blocker(&blockers[0])))
+            }
+        }
+    }
 }
 
 // ─── Explicit table list (--also-tables) ──────────────────────────────────────

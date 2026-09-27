@@ -337,12 +337,12 @@ pub const GET_SERVER_VERSION_NUM: &str = "SELECT current_setting('server_version
 pub const GET_IS_IN_RECOVERY: &str = "SELECT pg_is_in_recovery()";
 
 /// The server's autovacuum_analyze_threshold and autovacuum_analyze_scale_factor
-/// settings. Used as the default stale-stats thresholds unless overridden by
-/// --analyze-threshold / --analyze-scale-factor.
-pub const GET_ANALYZE_SETTINGS: &str = r#"
+/// settings. Used as the default needs-vacuum thresholds unless overridden by
+/// --vacuum-threshold / --vacuum-scale-factor.
+pub const GET_VACUUM_SETTINGS: &str = r#"
     SELECT
-        current_setting('autovacuum_analyze_threshold')::bigint    AS analyze_threshold,
-        current_setting('autovacuum_analyze_scale_factor')::float8 AS analyze_scale_factor
+        current_setting('autovacuum_vacuum_threshold')::bigint    AS vacuum_threshold,
+        current_setting('autovacuum_vacuum_scale_factor')::float8 AS vacuum_scale_factor
 "#;
 
 /// Tables with excessive dead tuples (bloat candidates).
@@ -462,101 +462,100 @@ pub const FIND_ACTIVE_VACUUMS_ON_TABLE: &str = r#"
       AND pc.relname = $2
 "#;
 
-/// Tables where enough rows have changed since the last ANALYZE that planner
-/// statistics are likely stale, based on the same math PostgreSQL's own
-/// autovacuum uses (analyze_threshold + analyze_scale_factor * n_live_tup).
+/// Tables where dead tuples exceed the autovacuum threshold formula
+/// (vacuum_threshold + vacuum_scale_factor * n_live_tup).
 ///
-/// Default ordering: n_mod_since_analyze descending (most drift first).
+/// Default ordering: n_dead_tup descending (most bloat first).
 /// Excludes partitioned parent tables (relkind = 'p').
 /// Parameters:
 ///   $1 = array of schema names (text[])
-///   $2 = flat modification-count floor (bigint)
+///   $2 = flat dead-tuple floor (bigint)
 ///   $3 = scale factor applied to live row count (float8)
 ///   $4 = minimum table size in bytes (i64)
 ///   $5 = maximum table size in bytes (i64)
 ///   $6 = limit (i64, use i64::MAX for no limit)
-pub const FIND_STALE_STATS: &str = r#"
+pub const FIND_NEEDS_VACUUM: &str = r#"
     SELECT
         t.schemaname,
         t.relname AS tablename,
-        COALESCE(t.n_live_tup, -1)          AS n_live_tup,
-        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze,
-        pg_table_size(t.relid)              AS size_bytes,
-        GREATEST(t.last_analyze, t.last_autoanalyze) AS last_maintained
+        COALESCE(t.n_live_tup, -1)  AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup,
+        pg_table_size(t.relid)      AS size_bytes,
+        GREATEST(t.last_vacuum, t.last_autovacuum) AS last_maintained
     FROM pg_stat_user_tables t
     JOIN pg_class c ON c.oid = t.relid
     WHERE t.schemaname = ANY($1::text[])
       AND c.relkind != 'p'
       AND pg_table_size(t.relid) BETWEEN $4 AND $5
-      AND t.n_mod_since_analyze > ($2::bigint + $3::float8 * COALESCE(t.n_live_tup, 0))
-    ORDER BY t.n_mod_since_analyze DESC
+      AND t.n_dead_tup > ($2::bigint + $3::float8 * COALESCE(t.n_live_tup, 0))
+    ORDER BY t.n_dead_tup DESC NULLS LAST
     LIMIT $6;
 "#;
 
-/// Same as FIND_STALE_STATS, ordered by table size descending (largest first).
-/// Parameters: same as FIND_STALE_STATS.
-pub const FIND_STALE_STATS_BY_SIZE: &str = r#"
+/// Same as FIND_NEEDS_VACUUM, ordered by table size descending (largest first).
+/// Parameters: same as FIND_NEEDS_VACUUM.
+pub const FIND_NEEDS_VACUUM_BY_SIZE: &str = r#"
     SELECT
         t.schemaname,
         t.relname AS tablename,
-        COALESCE(t.n_live_tup, -1)          AS n_live_tup,
-        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze,
-        pg_table_size(t.relid)              AS size_bytes,
-        GREATEST(t.last_analyze, t.last_autoanalyze) AS last_maintained
+        COALESCE(t.n_live_tup, -1)  AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup,
+        pg_table_size(t.relid)      AS size_bytes,
+        GREATEST(t.last_vacuum, t.last_autovacuum) AS last_maintained
     FROM pg_stat_user_tables t
     JOIN pg_class c ON c.oid = t.relid
     WHERE t.schemaname = ANY($1::text[])
       AND c.relkind != 'p'
       AND pg_table_size(t.relid) BETWEEN $4 AND $5
-      AND t.n_mod_since_analyze > ($2::bigint + $3::float8 * COALESCE(t.n_live_tup, 0))
+      AND t.n_dead_tup > ($2::bigint + $3::float8 * COALESCE(t.n_live_tup, 0))
     ORDER BY size_bytes DESC
     LIMIT $6;
 "#;
 
-/// Same as FIND_STALE_STATS, ordered by last-maintained ascending (oldest/never first).
-/// Parameters: same as FIND_STALE_STATS.
-pub const FIND_STALE_STATS_BY_LAST_MAINTAINED: &str = r#"
+/// Same as FIND_NEEDS_VACUUM, ordered by last-maintained ascending (oldest first).
+/// Parameters: same as FIND_NEEDS_VACUUM.
+pub const FIND_NEEDS_VACUUM_BY_LAST_MAINTAINED: &str = r#"
     SELECT
         t.schemaname,
         t.relname AS tablename,
-        COALESCE(t.n_live_tup, -1)          AS n_live_tup,
-        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze,
-        pg_table_size(t.relid)              AS size_bytes,
-        GREATEST(t.last_analyze, t.last_autoanalyze) AS last_maintained
+        COALESCE(t.n_live_tup, -1)  AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup,
+        pg_table_size(t.relid)      AS size_bytes,
+        GREATEST(t.last_vacuum, t.last_autovacuum) AS last_maintained
     FROM pg_stat_user_tables t
     JOIN pg_class c ON c.oid = t.relid
     WHERE t.schemaname = ANY($1::text[])
       AND c.relkind != 'p'
       AND pg_table_size(t.relid) BETWEEN $4 AND $5
-      AND t.n_mod_since_analyze > ($2::bigint + $3::float8 * COALESCE(t.n_live_tup, 0))
+      AND t.n_dead_tup > ($2::bigint + $3::float8 * COALESCE(t.n_live_tup, 0))
     ORDER BY last_maintained ASC NULLS FIRST
     LIMIT $6;
 "#;
 
-/// Same as FIND_STALE_STATS but scoped to a single table.
+/// Same as FIND_NEEDS_VACUUM but scoped to a single table.
 /// Parameters:
 ///   $1 = array of schema names (text[])
 ///   $2 = table name (text)
-///   $3 = flat modification-count floor (bigint)
+///   $3 = flat dead-tuple floor (bigint)
 ///   $4 = scale factor applied to live row count (float8)
 ///   $5 = minimum table size in bytes (i64)
 ///   $6 = maximum table size in bytes (i64)
-pub const FIND_STALE_STATS_TABLE: &str = r#"
+pub const FIND_NEEDS_VACUUM_TABLE: &str = r#"
     SELECT
         t.schemaname,
         t.relname AS tablename,
-        COALESCE(t.n_live_tup, -1)          AS n_live_tup,
-        COALESCE(t.n_mod_since_analyze, -1) AS n_mod_since_analyze,
-        pg_table_size(t.relid)              AS size_bytes,
-        GREATEST(t.last_analyze, t.last_autoanalyze) AS last_maintained
+        COALESCE(t.n_live_tup, -1)  AS n_live_tup,
+        COALESCE(t.n_dead_tup, -1)  AS n_dead_tup,
+        pg_table_size(t.relid)      AS size_bytes,
+        GREATEST(t.last_vacuum, t.last_autovacuum) AS last_maintained
     FROM pg_stat_user_tables t
     JOIN pg_class c ON c.oid = t.relid
     WHERE t.schemaname = ANY($1::text[])
       AND t.relname = $2
       AND c.relkind != 'p'
       AND pg_table_size(t.relid) BETWEEN $5 AND $6
-      AND t.n_mod_since_analyze > ($3::bigint + $4::float8 * COALESCE(t.n_live_tup, 0))
-    ORDER BY t.n_mod_since_analyze DESC;
+      AND t.n_dead_tup > ($3::bigint + $4::float8 * COALESCE(t.n_live_tup, 0))
+    ORDER BY t.n_dead_tup DESC NULLS LAST;
 "#;
 
 /// Tables whose most recent VACUUM (manual or auto) is older than the configured
@@ -684,7 +683,7 @@ pub const GET_DEAD_TUPLE_COUNT: &str = r#"
 ///   $1 = schema_name (text)
 ///   $2 = table_name (text)
 ///   $3 = operation (text) — "VACUUM", "ANALYZE", or "FREEZE"
-///   $4 = mode (text) — "never-vacuumed", "bloated", "wraparound", "never-analyzed", or "stale-stats"
+///   $4 = mode (text) — "never-vacuumed", "prevent-bloat", "prevent-wraparound", "never-analyzed", or "needs-vacuum"
 ///   $5 = status (text) — "success" or "error"
 ///   $6 = dead_tuples_before (bigint, nullable)
 ///   $7 = dead_tuples_removed (bigint, nullable)
@@ -728,6 +727,53 @@ pub const GET_REPLICATION_LAG: &str = r#"
 /// Parameters: none
 pub const GET_CAN_READ_REPLICATION_STATS: &str = r#"
     SELECT pg_has_role(current_user, 'pg_read_all_stats', 'USAGE') AS can_read;
+"#;
+
+/// Whether the connected role may read activity/slot/prepared-xact information needed
+/// for xmin horizon diagnosis.
+///
+/// Without membership of pg_read_all_stats (which pg_monitor and superuser both
+/// confer) the role only sees its own backend, which would look identical to
+/// "no blockers" and mask the real problem.
+///
+/// Parameters: none
+pub const GET_CAN_READ_ACTIVITY_XMIN: &str = r#"
+    SELECT pg_has_role(current_user, 'pg_read_all_stats', 'USAGE') AS can_read;
+"#;
+
+/// Transactions/processes currently holding back the cluster's vacuum (xmin) horizon.
+/// Returns all three types of blockers (backends with open transactions, replication
+/// slots, and prepared transactions), ordered by XID age descending.
+///
+/// Parameters: none
+pub const FIND_XMIN_HORIZON_BLOCKERS: &str = r#"
+    SELECT 'backend'::text AS holder_type,
+           pid::text AS identifier,
+           usename AS detail,
+           state AS status,
+           age(backend_xmin)::bigint AS xid_age,
+           EXTRACT(EPOCH FROM (now() - xact_start))::bigint AS xact_duration_secs,
+           EXTRACT(EPOCH FROM (now() - query_start))::bigint AS query_duration_secs,
+           left(query, 200) AS query_snippet
+    FROM pg_stat_activity
+    WHERE backend_xmin IS NOT NULL
+      AND pid <> pg_backend_pid()
+
+    UNION ALL
+
+    SELECT 'replication_slot', slot_name, slot_type, active::text,
+           GREATEST(age(COALESCE(xmin, '0'::xid)),
+                    age(COALESCE(catalog_xmin, '0'::xid))), NULL, NULL, NULL
+    FROM pg_replication_slots
+    WHERE xmin IS NOT NULL OR catalog_xmin IS NOT NULL
+
+    UNION ALL
+
+    SELECT 'prepared_xact', gid, owner, NULL,
+           age(transaction), EXTRACT(EPOCH FROM (now() - prepared))::bigint, NULL, NULL
+    FROM pg_prepared_xacts
+
+    ORDER BY xid_age DESC NULLS LAST;
 "#;
 
 /// Which of the explicitly requested schema/table pairs actually exist.

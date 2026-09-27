@@ -18,9 +18,18 @@ pub const DEFAULT_WRAPAROUND_MIN_AGE: i64 = 200_000_000;
 pub const DEFAULT_BLOAT_THRESHOLD_PCT: f64 = 80.0;
 pub const DEFAULT_BLOAT_MIN_DEAD_TUP: i64 = 1000;
 
+// Needs-vacuum thresholds — defaults match PostgreSQL's autovacuum GUCs
+pub const DEFAULT_VACUUM_THRESHOLD: i64 = 50;
+pub const DEFAULT_VACUUM_SCALE_FACTOR: f64 = 0.2;
+
 // Stale-stats (re-analyze) thresholds — defaults match PostgreSQL's autovacuum GUCs
 pub const DEFAULT_ANALYZE_THRESHOLD: i64 = 50;
 pub const DEFAULT_ANALYZE_SCALE_FACTOR: f64 = 0.1;
+
+// Vacuum-horizon pre-check: an arbitrary "worth investigating" floor, not tied
+// to a PostgreSQL GUC (unlike the wraparound/analyze/vacuum thresholds above) —
+// there's no server-side equivalent to read live, so this is just a sane default.
+pub const DEFAULT_XMIN_HORIZON_WARN_AGE: i64 = 1_000_000;
 
 // I/O throttling (cost-based vacuum delay). Ranges match PostgreSQL's GUC limits:
 // vacuum_cost_delay is a floating-point value in ms with range 0–100 (PostgreSQL 12+),

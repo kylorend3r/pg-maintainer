@@ -13,6 +13,7 @@ pub struct RunPolicy {
     pub dry_run: bool,
     pub force: bool,
     pub skip_active_vacuum: bool,
+    pub check_xmin_horizon: bool,
 }
 
 /// Session-scoped I/O throttling settings (`vacuum_cost_delay`/`vacuum_cost_limit`).
@@ -236,9 +237,9 @@ pub struct OperationSummary {
 pub enum Mode {
     NeverVacuumed,
     NeverAnalyzed,
-    Wraparound,
-    Bloated,
-    StaleStats,
+    PreventWraparound,
+    PreventBloat,
+    NeedsVacuum,
     VacuumOverdue,
     AnalyzeOverdue,
 }
@@ -248,9 +249,9 @@ impl std::fmt::Display for Mode {
         match self {
             Mode::NeverVacuumed => write!(f, "never-vacuumed"),
             Mode::NeverAnalyzed => write!(f, "never-analyzed"),
-            Mode::Wraparound => write!(f, "wraparound"),
-            Mode::Bloated => write!(f, "bloated"),
-            Mode::StaleStats => write!(f, "stale-stats"),
+            Mode::PreventWraparound => write!(f, "prevent-wraparound"),
+            Mode::PreventBloat => write!(f, "prevent-bloat"),
+            Mode::NeedsVacuum => write!(f, "needs-vacuum"),
             Mode::VacuumOverdue => write!(f, "vacuum-overdue"),
             Mode::AnalyzeOverdue => write!(f, "analyze-overdue"),
         }
@@ -264,13 +265,13 @@ impl std::str::FromStr for Mode {
         match s.to_lowercase().as_str() {
             "never-vacuumed" => Ok(Mode::NeverVacuumed),
             "never-analyzed" => Ok(Mode::NeverAnalyzed),
-            "wraparound" => Ok(Mode::Wraparound),
-            "bloated" => Ok(Mode::Bloated),
-            "stale-stats" => Ok(Mode::StaleStats),
+            "prevent-wraparound" => Ok(Mode::PreventWraparound),
+            "prevent-bloat" => Ok(Mode::PreventBloat),
+            "needs-vacuum" => Ok(Mode::NeedsVacuum),
             "vacuum-overdue" => Ok(Mode::VacuumOverdue),
             "analyze-overdue" => Ok(Mode::AnalyzeOverdue),
             _ => Err(format!(
-                "Invalid mode '{s}'. Must be one of: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats, vacuum-overdue, analyze-overdue"
+                "Invalid mode '{s}'. Must be one of: never-vacuumed, never-analyzed, prevent-wraparound, prevent-bloat, needs-vacuum, vacuum-overdue, analyze-overdue"
             )),
         }
     }
@@ -337,27 +338,27 @@ impl BloatTableInfo {
     }
 }
 
-/// A table that is a candidate for re-analysis because enough rows have changed
-/// since the last analyze that planner statistics are likely stale.
+/// A table where dead tuples exceed the autovacuum threshold formula
+/// (needs-vacuum candidates).
 #[derive(Debug, Clone)]
-pub struct StaleStatsTableInfo {
+pub struct NeedsVacuumTableInfo {
     pub schema_name: String,
     pub table_name: String,
     /// Estimated live row count from pg_stat_user_tables
     pub n_live_tup: i64,
-    /// Rows inserted/updated/deleted since the last ANALYZE (manual or auto)
-    pub n_mod_since_analyze: i64,
+    /// Estimated dead row count from pg_stat_user_tables
+    pub n_dead_tup: i64,
     /// On-disk size in bytes (pg_table_size), for --order-by size
     pub size_bytes: i64,
-    /// GREATEST(last_analyze, last_autoanalyze), for --order-by last-maintained
+    /// GREATEST(last_vacuum, last_autovacuum), for --order-by last-maintained
     pub last_maintained: Option<std::time::SystemTime>,
 }
 
-impl StaleStatsTableInfo {
-    /// The absolute modification-count threshold that was crossed, given the
+impl NeedsVacuumTableInfo {
+    /// The absolute dead-tuple threshold that was crossed, given the
     /// configured flat floor and scale factor.
-    pub fn effective_threshold(&self, analyze_threshold: i64, analyze_scale_factor: f64) -> i64 {
-        analyze_threshold + (analyze_scale_factor * self.n_live_tup as f64).round() as i64
+    pub fn effective_threshold(&self, vacuum_threshold: i64, vacuum_scale_factor: f64) -> i64 {
+        vacuum_threshold + (vacuum_scale_factor * self.n_live_tup as f64).round() as i64
     }
 }
 
@@ -571,4 +572,26 @@ impl ReplicaLagGate {
         self.tables_skipped
             .load(std::sync::atomic::Ordering::Relaxed)
     }
+}
+
+/// One thing currently holding back the cluster's vacuum (xmin) horizon.
+#[derive(Debug, Clone, PartialEq)]
+pub struct XminHorizonBlocker {
+    pub holder_type: String, // "backend" | "replication_slot" | "prepared_xact"
+    pub identifier: String,  // pid, slot name, or gid
+    pub detail: Option<String>,
+    pub status: Option<String>,
+    pub xid_age: i64,
+    pub xact_duration: Option<std::time::Duration>,
+    pub query_duration: Option<std::time::Duration>,
+    pub query_snippet: Option<String>,
+}
+
+/// Result of probing the cluster's vacuum horizon, mirroring `LagObservation`'s
+/// shape for the same reason: an empty/observed distinction that a missing
+/// privilege must not silently collapse into "healthy."
+#[derive(Debug, Clone, PartialEq)]
+pub enum HorizonObservation {
+    Unobservable,
+    Observed(Vec<XminHorizonBlocker>), // empty = no blockers found
 }
