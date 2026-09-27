@@ -32,13 +32,17 @@ data away on exit. Drop `--rm` if you want the state to survive between runs.
 | Table | State | Mode that picks it up |
 |---|---|---|
 | `fresh_signups` | Never vacuumed, never analyzed | `never-vacuumed`, `never-analyzed` |
-| `bloated_events` | 90% dead tuples | `bloated` |
-| `stale_customers` | 28333 modifications since analyze | `stale-stats` |
+| `bloated_events` | ~90% dead tuples (above the 80% bloat threshold) | `prevent-bloat` (default) |
+| `needs_vacuum_orders` | ~25% dead tuples (below bloat threshold, above the real autovacuum formula) | `needs-vacuum` (opt-in) |
 | `quiet_archive` | Clean, fresh statistics | none; should be skipped |
 
-A correct run touches exactly the first three and leaves `quiet_archive` alone.
-Because a table matched by an earlier mode is not reprocessed by a later one, you
-will also see `bloated_events` and `fresh_signups` reported as skipped in phase 5.
+`never-vacuumed`, `never-analyzed`, `prevent-wraparound`, and `prevent-bloat` run
+by default, so a plain `pg-maintainer -s public` touches `fresh_signups` and
+`bloated_events` and leaves `needs_vacuum_orders` and `quiet_archive` alone. Add
+`--mode ...,needs-vacuum` to also pick up `needs_vacuum_orders`.
+
+A vacuum-horizon (xmin) diagnostic runs once before phase 1 by default; pass
+`--skip-xmin-horizon-check` to disable it.
 
 **Autovacuum is off.** That is deliberate. Left on, the background worker would
 clean up the seeded dead tuples and stamp every table as recently vacuumed, leaving
@@ -59,14 +63,21 @@ changed, then `reseed` to start over.
 
 ```bash
 # Throttled, so maintenance yields to production traffic
-pg-maintainer -s public --gentle --mode bloated
+pg-maintainer -s public --gentle --mode prevent-bloat
+
+# The opt-in needs-vacuum mode: dead tuples exceed the real autovacuum
+# threshold formula, but not the 80% prevent-bloat cutoff
+pg-maintainer -s public --mode needs-vacuum --dry-run
 
 # One connection string instead of five flags
 pg-maintainer -s public --dsn "postgres://postgres@/demo?host=/var/run/postgresql"
 
 # Wraparound needs a lowered threshold here: freezing 200 million transactions
 # to produce a genuine candidate is not practical in a demo
-pg-maintainer -s public --mode wraparound --wraparound-min-age 1 --dry-run
+pg-maintainer -s public --mode prevent-wraparound --wraparound-min-age 1 --dry-run
+
+# Skip the automatic vacuum-horizon (xmin) pre-flight check
+pg-maintainer -s public --skip-xmin-horizon-check --dry-run
 
 # JSON logs, for piping somewhere
 pg-maintainer -s public --log-format json --dry-run

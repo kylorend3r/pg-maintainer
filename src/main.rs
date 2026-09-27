@@ -79,13 +79,13 @@ struct Args {
     dry_run: bool,
 
     // ── Mode selection ───────────────────────────────────────────────────────
-    /// Comma-separated modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats,
-    /// vacuum-overdue, analyze-overdue.
-    /// Defaults to the first five when omitted.
+    /// Comma-separated modes to run: never-vacuumed, never-analyzed, prevent-wraparound, prevent-bloat,
+    /// needs-vacuum, vacuum-overdue, analyze-overdue.
+    /// Defaults to the first four when omitted.
     #[arg(
         long,
         value_delimiter = ',',
-        help = "Modes to run: never-vacuumed, never-analyzed, wraparound, bloated, stale-stats, vacuum-overdue, analyze-overdue"
+        help = "Modes to run: never-vacuumed, never-analyzed, prevent-wraparound, prevent-bloat, needs-vacuum, vacuum-overdue, analyze-overdue"
     )]
     mode: Option<Vec<String>>,
 
