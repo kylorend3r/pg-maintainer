@@ -8,8 +8,54 @@ permissions:
   contents: write
 
 jobs:
+  qualify:
+    name: Qualify release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check tag matches Cargo.toml version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          crate_version="$(grep -m1 '^version' Cargo.toml | sed -E 's/version = "(.*)"/\1/')"
+          if [ "$tag_version" != "$crate_version" ]; then
+            echo "Tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${crate_version}" >&2
+            exit 1
+          fi
+
+      - name: Run unit tests
+        run: cargo test --test unit_tests --verbose
+
+      - name: Run CLI validation tests
+        run: cargo test --test cli_validation --verbose
+
+      - name: Run logging and dry-run tests
+        run: cargo test --test logging_and_dry_run --verbose
+
+      - name: Run Clippy
+        run: cargo clippy -- -D warnings
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+  create-release:
+    name: Create GitHub Release
+    needs: qualify
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release with auto-generated notes
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+
   build:
     name: Build ${{ matrix.asset_name }}
+    needs: create-release
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -58,8 +104,12 @@ jobs:
         run: |
           tar -czf pg-maintainer-${{ matrix.asset_name }}-${{ github.ref_name }}.tar.gz \
             -C target/${{ matrix.target }}/release pg-maintainer
+          shasum -a 256 pg-maintainer-${{ matrix.asset_name }}-${{ github.ref_name }}.tar.gz \
+            > pg-maintainer-${{ matrix.asset_name }}-${{ github.ref_name }}.tar.gz.sha256
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
         with:
-          files: pg-maintainer-${{ matrix.asset_name }}-${{ github.ref_name }}.tar.gz
+          files: |
+            pg-maintainer-${{ matrix.asset_name }}-${{ github.ref_name }}.tar.gz
+            pg-maintainer-${{ matrix.asset_name }}-${{ github.ref_name }}.tar.gz.sha256

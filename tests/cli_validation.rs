@@ -30,7 +30,7 @@ fn test_version_flag() {
         .assert()
         .success()
         .stdout(predicate::str::contains("pg-maintainer"))
-        .stdout(predicate::str::contains("1.0.0"));
+        .stdout(predicate::str::contains("2.0.0"));
 }
 
 // ── Required-schema validation ─────────────────────────────────────────────────
