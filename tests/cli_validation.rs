@@ -1248,6 +1248,138 @@ vacuum-cost-limit = 50000
         .stderr(predicate::str::contains("--vacuum-cost-limit"));
 }
 
+// ── Lock-timeout retry (--lock-timeout-retries / --lock-timeout-retry-delay-ms) ─
+
+#[test]
+fn test_lock_timeout_retries_default_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_lock_timeout_retries_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--lock-timeout-retries")
+        .arg("5")
+        .arg("--lock-timeout-retry-delay-ms")
+        .arg("100")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_lock_timeout_retries_above_max_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
+        .arg("--lock-timeout-retries")
+        .arg("21")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--lock-timeout-retries"))
+        .stderr(predicate::str::contains("must be <= 20"));
+}
+
+#[test]
+fn test_lock_timeout_retry_delay_ms_zero_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
+        .arg("--lock-timeout-retry-delay-ms")
+        .arg("0")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--lock-timeout-retry-delay-ms"))
+        .stderr(predicate::str::contains("must be between 1 and"));
+}
+
+#[test]
+fn test_lock_timeout_retry_delay_ms_above_max_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
+        .arg("--lock-timeout-retry-delay-ms")
+        .arg("60001")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--lock-timeout-retry-delay-ms"))
+        .stderr(predicate::str::contains("must be between 1 and 60000"));
+}
+
+#[test]
+fn test_lock_timeout_retries_not_a_number_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--lock-timeout-retries")
+        .arg("many")
+        .env_clear()
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn test_config_file_with_lock_timeout_retry_keys() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+mode = ["never-vacuumed"]
+lock-timeout-retries = 3
+lock-timeout-retry-delay-ms = 100
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2))
+        .stderr(predicate::str::contains("--lock-timeout").not());
+}
+
+#[test]
+fn test_config_file_with_invalid_lock_timeout_retries_rejected() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+mode = ["never-vacuumed"]
+lock-timeout-retries = 50
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--lock-timeout-retries"));
+}
+
 // ── Connection string (--dsn / PG_DSN) ─────────────────────────────────────────
 
 #[test]

@@ -14,6 +14,11 @@ pub struct RunPolicy {
     pub force: bool,
     pub skip_active_vacuum: bool,
     pub check_xmin_horizon: bool,
+    /// Number of times to retry a table's VACUUM/ANALYZE after it fails on
+    /// lock_timeout, before falling back to skipping it. 0 = no retry.
+    pub lock_timeout_retries: u32,
+    /// Delay before the first retry; doubles after each subsequent retry.
+    pub lock_timeout_retry_delay_ms: u64,
 }
 
 /// Session-scoped I/O throttling settings (`vacuum_cost_delay`/`vacuum_cost_limit`).

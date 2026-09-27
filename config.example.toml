@@ -63,6 +63,14 @@ maintenance-work-mem-gb = 1   # max: 32
 # vacuum-cost-delay-ms = 10     # 0-100; 0 explicitly disables throttling
 # vacuum-cost-limit    = 200    # 1-10000; cost budget spent between delays
 
+# ── Lock-timeout retry ────────────────────────────────────────────────────────
+# A table that can't acquire its lock within lock_timeout (10ms) is skipped by
+# default. Set lock-timeout-retries above 0 to retry it instead, waiting
+# lock-timeout-retry-delay-ms before the first retry and doubling the delay
+# after each subsequent one.
+# lock-timeout-retries         = 0     # 0-20; 0 = skip immediately (default)
+# lock-timeout-retry-delay-ms  = 50    # 1-60000; doubles after each retry
+
 # ── VACUUM options ────────────────────────────────────────────────────────────
 vacuum-truncate = true                # truncate empty pages at end of table (default: true)
 # vacuum-disable-page-skipping = false # disable skipping all-visible pages (default: false)
