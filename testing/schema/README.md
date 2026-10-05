@@ -1,9 +1,10 @@
 # Test Fixture Schemas for pg-maintainer
 
-This directory contains two SQL fixtures. `setup_test_schema.sql` is the lean,
+This directory contains three SQL fixtures. `setup_test_schema.sql` is the lean,
 single-schema fixture CI loads on every push — do not change what it targets
-without also updating `.github/workflows/rust.yml`. `complex_schema.sql` is a
-richer, separate fixture for manual verification only; CI never loads it.
+without also updating `.github/workflows/rust.yml`. `complex_schema.sql` and
+`needs_vacuum_fixtures.sql` are separate fixtures for manual verification only;
+CI never loads them.
 
 ## `setup_test_schema.sql` (used by CI)
 
@@ -163,4 +164,70 @@ cargo run -- -d pgm_test -s complex_test --mode bloated --dry-run
 ```bash
 psql -h localhost -U pgm_test -d pgm_test -c \
   "DROP SCHEMA IF EXISTS complex_test CASCADE; DROP SCHEMA IF EXISTS complex_test_reporting CASCADE;"
+```
+
+---
+
+## `needs_vacuum_fixtures.sql` (manual verification only, not used by CI)
+
+Exercises `needs-vacuum` (the classic threshold formula plus the max-threshold
+pass that mirrors `autovacuum_vacuum_max_threshold`, per-table reloptions and the
+insert threshold) and `prevent-wraparound`. Everything lives in the `nv_fixtures`
+schema, and all fixture tables have autovacuum disabled so they stay in the
+state the script leaves them in.
+
+### What it creates
+
+| Table | State | Classic pass | Max-threshold pass |
+|---|---|---|---|
+| `dead_classic` | 100k dead tuples | **flagged** | **flagged** |
+| `insert_only` | 50k inserts since vacuum, 0 dead tuples | no | **flagged** (insert trigger) |
+| `reloption_high_thr` | own threshold 1M, insert trigger off, 10k dead tuples | **flagged** (only knows the global formula) | no (honours its reloptions) |
+| `healthy` | freshly vacuumed | no | no |
+| `wraparound_victim` | tiny table for XID aging | — | — |
+
+The merged needs-vacuum list therefore contains `dead_classic`, `insert_only`
+and `reloption_high_thr`, each once. The log line `Needs-vacuum candidates:
+classic=…, max-threshold pass=…, merged (unique)=…` shows the dedupe.
+
+### How to Use
+
+**1. Load it**
+
+```bash
+psql -h localhost -U <user> -d <db> -f testing/schema/needs_vacuum_fixtures.sql
+```
+
+**2. Test needs-vacuum**
+
+```bash
+PG_PASSWORD=... cargo run -- -H localhost -d <db> -U <user> -s nv_fixtures \
+  --mode needs-vacuum --dry-run
+```
+
+**3. Test prevent-wraparound**
+
+The script defines `nv_fixtures.burn_xids(n)`, which consumes `n` transaction IDs
+quickly (one subtransaction each, ~800k XIDs/s). Age the fixture table, then use a
+low `--wraparound-min-age`:
+
+```bash
+psql -h localhost -U <user> -d <db> -c "CALL nv_fixtures.burn_xids(6000000)"
+psql -h localhost -U <user> -d <db> -Atc \
+  "SELECT age(relfrozenxid) FROM pg_class WHERE relname = 'wraparound_victim'"
+
+PG_PASSWORD=... cargo run -- -H localhost -d <db> -U <user> -s nv_fixtures \
+  --mode prevent-wraparound --wraparound-min-age 5000000 --dry-run
+```
+
+**Safety:** burning XIDs ages the *whole cluster*, not just the fixture table.
+Autovacuum still starts anti-wraparound vacuums once a table's age passes
+`autovacuum_freeze_max_age` (default 200M), even for tables with autovacuum
+disabled, so burn well under that and lower `--wraparound-min-age` instead. Do
+not push anywhere near 2^31 (2.1 billion) on a database you care about.
+
+**Cleanup**
+
+```bash
+psql -h localhost -U <user> -d <db> -c "DROP SCHEMA IF EXISTS nv_fixtures CASCADE"
 ```

@@ -8,7 +8,7 @@ own README with the exact commands.
 |---|---|---|
 | `docker-compose.test.yml` + `docker-integration-test.sh` | Spins up a throwaway `postgres:latest`, loads `schema/setup_test_schema.sql`, runs a pgbench load, then dry-runs pg-maintainer in every mode. Not used by CI (see below). | this file, "Docker-compose harness" |
 | `sandbox/` | A self-contained demo image bundling the tool and its own PostgreSQL server, pre-seeded, for interactive exploration. Explicitly "not a deployment artifact." | [`sandbox/README.md`](sandbox/README.md) |
-| `schema/` | SQL fixtures: `setup_test_schema.sql` (lean, single-schema — what CI loads) and `complex_schema.sql` (multi-schema, partitioned table, foreign keys — manual verification only). | [`schema/README.md`](schema/README.md) |
+| `schema/` | SQL fixtures: `setup_test_schema.sql` (lean, single-schema — what CI loads) `complex_schema.sql` (multi-schema, partitioned table, foreign keys — manual verification only), and `needs_vacuum_fixtures.sql` (needs-vacuum max-threshold pass + XID aging for prevent-wraparound — manual verification only). | [`schema/README.md`](schema/README.md) |
 
 ## Docker-compose harness
 
