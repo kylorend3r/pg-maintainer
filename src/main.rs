@@ -1529,6 +1529,98 @@ async fn main() -> Result<()> {
         )
         .await
         .context("Failed to query needs-vacuum candidates")?;
+
+        // Second discovery pass: mirror autovacuum's max-threshold cap, per-table
+        // reloptions and insert threshold, then union with the classic list.
+        let server_version_num = match connection::get_server_version_num(&client).await {
+            Ok(v) => v,
+            Err(e) => {
+                logger.log(
+                    LogLevel::Warning,
+                    &format!("Could not read server version, assuming PostgreSQL < 18: {e}"),
+                );
+                0
+            }
+        };
+        let max_threshold =
+            match operations::get_vacuum_max_threshold(&client, server_version_num).await {
+                Ok(v) => v,
+                Err(e) => {
+                    let fallback = operations::derive_max_threshold(Some(
+                        pg_maintainer::config::DEFAULT_VACUUM_MAX_THRESHOLD_PRE18,
+                    ));
+                    logger.log(
+                        LogLevel::Warning,
+                        &format!("{e}; falling back to a max threshold of {fallback:.0}"),
+                    );
+                    fallback
+                }
+            };
+        if max_threshold >= 0.0 {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "Needs-vacuum max threshold: {max_threshold:.0} dead tuples (server version {server_version_num}{})",
+                    if server_version_num < pg_maintainer::config::PG18_VERSION_NUM {
+                        ", autovacuum_vacuum_max_threshold unavailable — assumed PG 18 default"
+                    } else {
+                        ", autovacuum_vacuum_max_threshold reduced by 20%"
+                    }
+                ),
+            );
+        } else {
+            logger.log(
+                LogLevel::Info,
+                "Needs-vacuum max threshold: disabled (autovacuum_vacuum_max_threshold = -1)",
+            );
+        }
+        let classic_count = candidates.len();
+        let max_thr_candidates = match operations::find_needs_vacuum_max_threshold_candidates(
+            &client,
+            &schemas,
+            table_filter,
+            max_threshold,
+            server_version_num,
+            min_bytes,
+            max_bytes,
+        )
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                logger.log(
+                    LogLevel::Warning,
+                    &format!("Max-threshold discovery failed, using classic candidates only: {e}"),
+                );
+                Vec::new()
+            }
+        };
+        let max_thr_count = max_thr_candidates.len();
+        let candidates = operations::merge_needs_vacuum_candidates(
+            candidates,
+            max_thr_candidates,
+            args.order_by,
+            limit_n,
+        );
+        let added = candidates.iter().filter(|t| t.via_max_threshold).count();
+        logger.log(
+            LogLevel::Info,
+            &format!(
+                "Needs-vacuum candidates: classic={classic_count}, max-threshold pass={max_thr_count}, \
+                 merged (unique)={} ({added} added by the max-threshold pass)",
+                candidates.len()
+            ),
+        );
+        for t in candidates.iter().filter(|t| t.via_max_threshold) {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "  + \"{}\".\"{}\" (dead_tup={}) added by max-threshold pass",
+                    t.schema_name, t.table_name, t.n_dead_tup
+                ),
+            );
+        }
+
         let summary = operations::run_needs_vacuum(
             &client,
             &candidates,
