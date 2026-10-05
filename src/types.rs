@@ -357,6 +357,9 @@ pub struct NeedsVacuumTableInfo {
     pub size_bytes: i64,
     /// GREATEST(last_vacuum, last_autovacuum), for --order-by last-maintained
     pub last_maintained: Option<std::time::SystemTime>,
+    /// True when only the max-threshold discovery pass found this table
+    /// (the classic threshold + scale-factor formula did not flag it).
+    pub via_max_threshold: bool,
 }
 
 impl NeedsVacuumTableInfo {

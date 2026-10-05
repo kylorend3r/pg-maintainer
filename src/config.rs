@@ -22,6 +22,14 @@ pub const DEFAULT_BLOAT_MIN_DEAD_TUP: i64 = 1000;
 pub const DEFAULT_VACUUM_THRESHOLD: i64 = 50;
 pub const DEFAULT_VACUUM_SCALE_FACTOR: f64 = 0.2;
 
+// autovacuum_vacuum_max_threshold only exists on PostgreSQL 18+. On older servers
+// we assume the value PostgreSQL 18 ships as its default (100M dead tuples).
+// On 18+ the live GUC is read and scaled by MAX_THRESHOLD_FACTOR so tables are
+// picked up a little earlier than autovacuum would act on them.
+pub const DEFAULT_VACUUM_MAX_THRESHOLD_PRE18: i64 = 100_000_000;
+pub const MAX_THRESHOLD_FACTOR: f64 = 0.8;
+pub const PG18_VERSION_NUM: i32 = 180000;
+
 // Stale-stats (re-analyze) thresholds — defaults match PostgreSQL's autovacuum GUCs
 pub const DEFAULT_ANALYZE_THRESHOLD: i64 = 50;
 pub const DEFAULT_ANALYZE_SCALE_FACTOR: f64 = 0.1;

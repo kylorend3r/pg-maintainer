@@ -1511,3 +1511,120 @@ fn test_xmin_privilege_probe_checks_pg_read_all_stats() {
         "the xmin probe must test pg_read_all_stats membership"
     );
 }
+
+// ── needs-vacuum max-threshold pass ──────────────────────────────────────────
+
+mod needs_vacuum_max_threshold {
+    use pg_maintainer::operations::{derive_max_threshold, merge_needs_vacuum_candidates};
+    use pg_maintainer::queries;
+    use pg_maintainer::types::{NeedsVacuumTableInfo, OrderBy};
+    use std::time::{Duration, SystemTime};
+
+    fn tbl(
+        schema: &str,
+        name: &str,
+        dead: i64,
+        size: i64,
+        last_secs: Option<u64>,
+        via_max: bool,
+    ) -> NeedsVacuumTableInfo {
+        NeedsVacuumTableInfo {
+            schema_name: schema.into(),
+            table_name: name.into(),
+            n_live_tup: 1000,
+            n_dead_tup: dead,
+            size_bytes: size,
+            last_maintained: last_secs.map(|s| SystemTime::UNIX_EPOCH + Duration::from_secs(s)),
+            via_max_threshold: via_max,
+        }
+    }
+
+    #[test]
+    fn derive_pre18_uses_pg18_default() {
+        assert_eq!(derive_max_threshold(None), 100_000_000.0);
+    }
+
+    #[test]
+    fn derive_pg18_reduces_guc_by_20_percent() {
+        assert_eq!(derive_max_threshold(Some(100_000_000)), 80_000_000.0);
+        assert_eq!(derive_max_threshold(Some(1000)), 800.0);
+    }
+
+    #[test]
+    fn derive_disabled_cap_is_negative() {
+        assert!(derive_max_threshold(Some(-1)) < 0.0);
+    }
+
+    #[test]
+    fn merge_dedupes_and_keeps_classic_entry() {
+        let classic = vec![tbl("public", "a", 10, 1, None, false)];
+        let extra = vec![
+            tbl("public", "a", 10, 1, None, true),
+            tbl("public", "b", 20, 1, None, true),
+            tbl("other", "a", 5, 1, None, true),
+        ];
+        let merged = merge_needs_vacuum_candidates(classic, extra, None, i64::MAX);
+        assert_eq!(merged.len(), 3);
+        let a = merged
+            .iter()
+            .find(|t| t.schema_name == "public" && t.table_name == "a")
+            .unwrap();
+        assert!(!a.via_max_threshold);
+        // default order: dead tuples descending
+        let dead: Vec<i64> = merged.iter().map(|t| t.n_dead_tup).collect();
+        assert_eq!(dead, vec![20, 10, 5]);
+    }
+
+    #[test]
+    fn merge_orders_by_size_and_last_maintained() {
+        let a = tbl("s", "a", 1, 10, Some(300), false);
+        let b = tbl("s", "b", 1, 30, None, true);
+        let c = tbl("s", "c", 1, 20, Some(100), true);
+
+        let by_size = merge_needs_vacuum_candidates(
+            vec![a.clone()],
+            vec![b.clone(), c.clone()],
+            Some(OrderBy::Size),
+            i64::MAX,
+        );
+        let names: Vec<&str> = by_size.iter().map(|t| t.table_name.as_str()).collect();
+        assert_eq!(names, vec!["b", "c", "a"]);
+
+        let by_last = merge_needs_vacuum_candidates(
+            vec![a],
+            vec![b, c],
+            Some(OrderBy::LastMaintained),
+            i64::MAX,
+        );
+        let names: Vec<&str> = by_last.iter().map(|t| t.table_name.as_str()).collect();
+        assert_eq!(names, vec!["b", "c", "a"]); // never-maintained first, then oldest
+    }
+
+    #[test]
+    fn merge_applies_limit() {
+        let classic = vec![
+            tbl("s", "a", 3, 1, None, false),
+            tbl("s", "b", 2, 1, None, false),
+        ];
+        let extra = vec![tbl("s", "c", 9, 1, None, true)];
+        let merged = merge_needs_vacuum_candidates(classic, extra, None, 2);
+        let names: Vec<&str> = merged.iter().map(|t| t.table_name.as_str()).collect();
+        assert_eq!(names, vec!["c", "a"]);
+    }
+
+    #[test]
+    fn max_threshold_queries_are_version_specific() {
+        assert!(queries::FIND_NEEDS_VACUUM_MAX_THR.contains("relallfrozen"));
+        assert!(!queries::FIND_NEEDS_VACUUM_MAX_THR_PRE18.contains("relallfrozen"));
+        for q in [
+            queries::FIND_NEEDS_VACUUM_MAX_THR,
+            queries::FIND_NEEDS_VACUUM_MAX_THR_PRE18,
+        ] {
+            // the GUC only exists on PG18+, so neither query may read it directly
+            assert!(!q.contains("current_setting('autovacuum_vacuum_max_threshold')"));
+            assert!(!q.contains("LIMIT"));
+            assert!(q.contains("$5::text IS NULL"));
+        }
+        assert!(queries::GET_VACUUM_MAX_THRESHOLD.contains("autovacuum_vacuum_max_threshold"));
+    }
+}

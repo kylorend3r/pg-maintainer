@@ -558,6 +558,89 @@ pub const FIND_NEEDS_VACUUM_TABLE: &str = r#"
     ORDER BY t.n_dead_tup DESC NULLS LAST;
 "#;
 
+/// The server's autovacuum_vacuum_max_threshold (PostgreSQL 18+ only — the GUC
+/// does not exist on older servers, so callers must check the version first).
+pub const GET_VACUUM_MAX_THRESHOLD: &str =
+    "SELECT current_setting('autovacuum_vacuum_max_threshold')::bigint";
+
+/// Shared body of the max-threshold-aware needs-vacuum discovery query.
+/// `$frozen_expr` is the fraction of pages that are all-frozen: `relallfrozen`
+/// exists on PostgreSQL 18+ only, so older servers pass a constant instead.
+macro_rules! needs_vacuum_max_thr_sql {
+    ($frozen_expr:literal) => {
+        concat!(
+            r#"
+    WITH g AS (
+      SELECT current_setting('autovacuum_vacuum_threshold')::float8           AS thr,
+             current_setting('autovacuum_vacuum_scale_factor')::float8        AS sf,
+             current_setting('autovacuum_vacuum_insert_threshold')::float8    AS ins_thr,
+             current_setting('autovacuum_vacuum_insert_scale_factor')::float8 AS ins_sf
+    ), t AS (
+      SELECT s.relid, s.schemaname, s.relname, s.n_live_tup, s.n_dead_tup, s.n_ins_since_vacuum,
+             GREATEST(s.last_autovacuum, s.last_vacuum) AS last_maintained,
+             GREATEST(c.reltuples, 0) AS reltuples,
+             "#,
+            $frozen_expr,
+            r#" AS frozen_frac,
+             COALESCE(o.thr, g.thr) AS thr, COALESCE(o.sf, g.sf) AS sf,
+             COALESCE(o.max_thr, $2::float8) AS max_thr,
+             COALESCE(o.ins_thr, g.ins_thr) AS ins_thr, COALESCE(o.ins_sf, g.ins_sf) AS ins_sf
+      FROM pg_stat_user_tables s
+      JOIN pg_class c ON c.oid = s.relid
+      CROSS JOIN g
+      LEFT JOIN LATERAL (
+        SELECT max(option_value) FILTER (WHERE option_name = 'autovacuum_vacuum_threshold')::float8           AS thr,
+               max(option_value) FILTER (WHERE option_name = 'autovacuum_vacuum_scale_factor')::float8        AS sf,
+               max(option_value) FILTER (WHERE option_name = 'autovacuum_vacuum_max_threshold')::float8       AS max_thr,
+               max(option_value) FILTER (WHERE option_name = 'autovacuum_vacuum_insert_threshold')::float8    AS ins_thr,
+               max(option_value) FILTER (WHERE option_name = 'autovacuum_vacuum_insert_scale_factor')::float8 AS ins_sf
+        FROM pg_options_to_table(c.reloptions)
+      ) o ON true
+      WHERE s.schemaname = ANY($1::text[])
+        AND c.relkind != 'p'
+        AND pg_table_size(s.relid) BETWEEN $3 AND $4
+        AND ($5::text IS NULL OR s.relname = $5::text)
+    ), x AS (
+      SELECT t.*,
+             CASE WHEN max_thr >= 0 THEN LEAST(thr + sf * reltuples, max_thr)
+                  ELSE thr + sf * reltuples END AS vac_thr,
+             ins_thr + ins_sf * reltuples * frozen_frac AS ins_thr_eff
+      FROM t
+    )
+    SELECT schemaname,
+           relname AS tablename,
+           COALESCE(n_live_tup, -1) AS n_live_tup,
+           COALESCE(n_dead_tup, -1) AS n_dead_tup,
+           pg_table_size(relid)     AS size_bytes,
+           last_maintained
+    FROM x
+    WHERE n_dead_tup > vac_thr
+       OR (ins_thr >= 0 AND n_ins_since_vacuum > ins_thr_eff)
+    ORDER BY n_dead_tup DESC NULLS LAST
+"#
+        )
+    };
+}
+
+/// Needs-vacuum discovery that mirrors autovacuum's real trigger on PostgreSQL 18+:
+/// per-table reloptions, the autovacuum_vacuum_max_threshold cap, and the
+/// insert-threshold trigger (accounting for all-frozen pages via relallfrozen).
+/// Excludes partitioned parent tables. Ordering/limit are applied after merging
+/// with the classic needs-vacuum candidates, so there is no LIMIT here.
+/// Parameters:
+///   $1 = array of schema names (text[])
+///   $2 = max-threshold cap in dead tuples (float8; negative = no cap)
+///   $3 = minimum table size in bytes (i64)
+///   $4 = maximum table size in bytes (i64)
+///   $5 = table name filter (text, NULL for all tables)
+pub const FIND_NEEDS_VACUUM_MAX_THR: &str =
+    needs_vacuum_max_thr_sql!("COALESCE(1 - c.relallfrozen::float8 / NULLIF(c.relpages, 0), 1)");
+
+/// Same as FIND_NEEDS_VACUUM_MAX_THR for PostgreSQL 14–17, where `relallfrozen`
+/// does not exist (the insert threshold is not reduced for frozen pages).
+/// Parameters: same as FIND_NEEDS_VACUUM_MAX_THR.
+pub const FIND_NEEDS_VACUUM_MAX_THR_PRE18: &str = needs_vacuum_max_thr_sql!("1::float8");
+
 /// Tables whose most recent VACUUM (manual or auto) is older than the configured
 /// number of days. Never-vacuumed tables are excluded (GREATEST returns NULL when
 /// both inputs are NULL).

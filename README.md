@@ -38,7 +38,7 @@ A single-threaded PostgreSQL table maintenance tool written in Rust. It runs fiv
 | 2 | `never-analyzed` | `ANALYZE` | Tables where neither manual nor autoanalyze has ever run |
 | 3 | `prevent-wraparound` | `VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE)` | Tables whose XID age exceeds the wraparound threshold |
 | 4 | `prevent-bloat` | `VACUUM (VERBOSE)` | Tables with excessive dead tuples (bloat > threshold, default 80%) |
-| 5 | `needs-vacuum` | `VACUUM (VERBOSE)` | Tables where dead tuples exceed the autovacuum threshold formula |
+| 5 | `needs-vacuum` | `VACUUM (VERBOSE)` | Tables where dead tuples exceed the autovacuum threshold formula, plus tables autovacuum itself would pick (per-table reloptions, `autovacuum_vacuum_max_threshold` cap reduced by 20% on PG 18+ / 100M assumed on older servers, insert threshold); the two lists are merged without duplicates |
 | 6 | `vacuum-overdue` | `VACUUM (VERBOSE)` | Tables not vacuumed in N days (requires `--vacuum-older-than-days`) |
 | 7 | `analyze-overdue` | `ANALYZE` | Tables not analyzed in M days (requires `--analyze-older-than-days`) |
 

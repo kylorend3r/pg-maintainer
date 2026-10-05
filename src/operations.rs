@@ -394,8 +394,105 @@ pub async fn find_needs_vacuum_candidates(
             n_dead_tup: row.get("n_dead_tup"),
             size_bytes: row.get("size_bytes"),
             last_maintained: row.get("last_maintained"),
+            via_max_threshold: false,
         })
         .collect())
+}
+
+/// Turns the server's autovacuum_vacuum_max_threshold (`None` on PostgreSQL < 18,
+/// where the GUC does not exist) into the dead-tuple cap used by the
+/// max-threshold discovery pass: the PG 18 default on older servers, otherwise
+/// the GUC reduced by 20%. A GUC of -1 (cap disabled) yields -1.0 (no cap).
+pub fn derive_max_threshold(guc: Option<i64>) -> f64 {
+    match guc {
+        None => crate::config::DEFAULT_VACUUM_MAX_THRESHOLD_PRE18 as f64,
+        Some(v) if v < 0 => -1.0,
+        Some(v) => v as f64 * crate::config::MAX_THRESHOLD_FACTOR,
+    }
+}
+
+/// Resolves the max-threshold cap for the connected server: reads
+/// autovacuum_vacuum_max_threshold on PostgreSQL 18+, assumes the PG 18 default
+/// on older versions (see `derive_max_threshold`).
+pub async fn get_vacuum_max_threshold(client: &Client, server_version_num: i32) -> Result<f64> {
+    if server_version_num < crate::config::PG18_VERSION_NUM {
+        return Ok(derive_max_threshold(None));
+    }
+    let row = client
+        .query_one(queries::GET_VACUUM_MAX_THRESHOLD, &[])
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read autovacuum_vacuum_max_threshold: {e}"))?;
+    Ok(derive_max_threshold(Some(row.get::<_, i64>(0))))
+}
+
+/// Returns tables autovacuum would act on, using per-table reloptions, the
+/// (reduced) max-threshold cap and the insert threshold. Complements
+/// `find_needs_vacuum_candidates`, whose flat formula ignores the cap on very
+/// large tables. All returned rows have `via_max_threshold = true`; use
+/// `merge_needs_vacuum_candidates` to combine and dedupe the two lists.
+pub async fn find_needs_vacuum_max_threshold_candidates(
+    client: &Client,
+    schemas: &[String],
+    table: Option<&str>,
+    max_threshold: f64,
+    server_version_num: i32,
+    min_bytes: i64,
+    max_bytes: i64,
+) -> Result<Vec<crate::types::NeedsVacuumTableInfo>> {
+    let query = if server_version_num >= crate::config::PG18_VERSION_NUM {
+        queries::FIND_NEEDS_VACUUM_MAX_THR
+    } else {
+        queries::FIND_NEEDS_VACUUM_MAX_THR_PRE18
+    };
+    let schemas_vec: Vec<String> = schemas.to_vec();
+    let rows = client
+        .query(
+            query,
+            &[&schemas_vec, &max_threshold, &min_bytes, &max_bytes, &table],
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!("Failed to query needs-vacuum max-threshold candidates: {e}")
+        })?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| crate::types::NeedsVacuumTableInfo {
+            schema_name: row.get("schemaname"),
+            table_name: row.get("tablename"),
+            n_live_tup: row.get("n_live_tup"),
+            n_dead_tup: row.get("n_dead_tup"),
+            size_bytes: row.get("size_bytes"),
+            last_maintained: row.get("last_maintained"),
+            via_max_threshold: true,
+        })
+        .collect())
+}
+
+/// Combines the classic needs-vacuum candidates with the max-threshold pass,
+/// keeping one entry per (schema, table) — the classic entry wins — then
+/// re-applies `--order-by` (default: most dead tuples first) and `--limit`.
+pub fn merge_needs_vacuum_candidates(
+    classic: Vec<crate::types::NeedsVacuumTableInfo>,
+    max_threshold: Vec<crate::types::NeedsVacuumTableInfo>,
+    order_by: Option<OrderBy>,
+    limit: i64,
+) -> Vec<crate::types::NeedsVacuumTableInfo> {
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    let mut merged: Vec<_> = classic
+        .into_iter()
+        .chain(max_threshold)
+        .filter(|t| seen.insert((t.schema_name.clone(), t.table_name.clone())))
+        .collect();
+
+    match order_by {
+        None => merged.sort_by_key(|t| std::cmp::Reverse(t.n_dead_tup)),
+        Some(OrderBy::Size) => merged.sort_by_key(|t| std::cmp::Reverse(t.size_bytes)),
+        // Option's Ord puts None (never maintained) first, matching NULLS FIRST.
+        Some(OrderBy::LastMaintained) => merged.sort_by_key(|t| t.last_maintained),
+    }
+    merged.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    merged
 }
 
 /// Returns tables whose most recent VACUUM (manual or auto) is older than the
@@ -1695,8 +1792,16 @@ pub async fn run_needs_vacuum(
             logger.log(
                 LogLevel::Info,
                 &format!(
-                    "[DRY RUN] Would run: VACUUM (VERBOSE) \"{}\".\"{}\"  (dead_tup={}, threshold={})",
-                    t.schema_name, t.table_name, t.n_dead_tup, effective_threshold
+                    "[DRY RUN] Would run: VACUUM (VERBOSE) \"{}\".\"{}\"  (dead_tup={}, threshold={}{})",
+                    t.schema_name,
+                    t.table_name,
+                    t.n_dead_tup,
+                    effective_threshold,
+                    if t.via_max_threshold {
+                        "; found by max-threshold pass"
+                    } else {
+                        ""
+                    }
                 ),
             );
             continue;
