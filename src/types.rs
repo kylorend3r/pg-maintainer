@@ -202,6 +202,44 @@ impl std::str::FromStr for LogFormat {
     }
 }
 
+/// What to do with the statement a run is executing when SIGTERM/SIGINT arrives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShutdownMode {
+    /// Let the current statement finish; stop before the next table.
+    Finish,
+    /// Cancel the running statement (pg_cancel_backend), then terminate the
+    /// backend if it is still running after the grace period.
+    #[default]
+    Cancel,
+    /// Terminate the backend immediately (pg_terminate_backend).
+    Terminate,
+}
+
+impl std::fmt::Display for ShutdownMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ShutdownMode::Finish => write!(f, "finish"),
+            ShutdownMode::Cancel => write!(f, "cancel"),
+            ShutdownMode::Terminate => write!(f, "terminate"),
+        }
+    }
+}
+
+impl std::str::FromStr for ShutdownMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "finish" => Ok(ShutdownMode::Finish),
+            "cancel" => Ok(ShutdownMode::Cancel),
+            "terminate" => Ok(ShutdownMode::Terminate),
+            _ => Err(format!(
+                "Invalid shutdown mode '{s}'. Must be one of: 'finish', 'cancel', 'terminate'"
+            )),
+        }
+    }
+}
+
 /// Log file rotation strategy
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LogRotation {

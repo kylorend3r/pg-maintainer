@@ -7,7 +7,7 @@ use pg_maintainer::config::{
 use pg_maintainer::connection::{self, ConnectionConfig};
 use pg_maintainer::logging::{LogLevel, Logger};
 use pg_maintainer::operations;
-use pg_maintainer::types::{LogFormat, LogRotation, Mode, OrderBy, SslMode};
+use pg_maintainer::types::{LogFormat, LogRotation, Mode, OrderBy, ShutdownMode, SslMode};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
@@ -254,6 +254,28 @@ struct Args {
     )]
     lock_timeout_retry_delay_ms: u64,
 
+    // ── Shutdown ─────────────────────────────────────────────────────────────
+    /// What to do with the running statement on SIGTERM/SIGINT: finish (let it
+    /// complete), cancel (pg_cancel_backend, then pg_terminate_backend after the
+    /// grace period) or terminate (pg_terminate_backend immediately).
+    #[arg(
+        long,
+        value_name = "MODE",
+        default_value = "cancel",
+        value_parser = clap::value_parser!(ShutdownMode),
+        help = "On SIGTERM/SIGINT: finish | cancel | terminate the running statement (default: cancel)"
+    )]
+    shutdown_mode: ShutdownMode,
+
+    /// Seconds to wait after pg_cancel_backend before pg_terminate_backend.
+    #[arg(
+        long,
+        value_name = "SECONDS",
+        default_value_t = pg_maintainer::config::DEFAULT_SHUTDOWN_GRACE_SECONDS,
+        help = "Seconds between cancel and terminate on shutdown, 1-300 (default: 10)"
+    )]
+    shutdown_grace_seconds: u64,
+
     // ── Replication lag ──────────────────────────────────────────────────────
     /// Hold maintenance on each table while any standby's replay lag exceeds this
     /// many seconds. Omit to disable lag gating entirely.
@@ -428,6 +450,8 @@ struct Config {
     lock_timeout_ms: Option<u64>,
     lock_timeout_retries: Option<u32>,
     lock_timeout_retry_delay_ms: Option<u64>,
+    shutdown_mode: Option<String>,
+    shutdown_grace_seconds: Option<u64>,
     max_replica_lag_seconds: Option<f64>,
     max_replica_lag_wait_seconds: Option<u64>,
     skip_xmin_horizon_check: Option<bool>,
@@ -589,6 +613,18 @@ fn merge_config(file: Config, mut args: Args) -> Args {
         && let Some(v) = file.lock_timeout_retry_delay_ms
     {
         args.lock_timeout_retry_delay_ms = v;
+    }
+
+    if args.shutdown_mode == ShutdownMode::default()
+        && let Some(ref m) = file.shutdown_mode
+        && let Ok(mode) = m.parse::<ShutdownMode>()
+    {
+        args.shutdown_mode = mode;
+    }
+    if args.shutdown_grace_seconds == pg_maintainer::config::DEFAULT_SHUTDOWN_GRACE_SECONDS
+        && let Some(v) = file.shutdown_grace_seconds
+    {
+        args.shutdown_grace_seconds = v;
     }
 
     if args.max_replica_lag_seconds.is_none() {
@@ -754,6 +790,15 @@ fn apply_dsn(mut args: Args) -> Result<(Args, DsnOutcome)> {
     Ok((args, outcome))
 }
 
+/// Why a phase is not running: it was not selected, or a shutdown was requested.
+fn skip_reason(enabled: bool) -> &'static str {
+    if enabled {
+        "shutdown requested"
+    } else {
+        "not in --mode"
+    }
+}
+
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -768,7 +813,10 @@ async fn main() -> std::process::ExitCode {
             {
                 eprintln!("Error: {e:?}");
             }
-            std::process::ExitCode::from(pg_maintainer::db_error::exit_code_for(&e))
+            std::process::ExitCode::from(pg_maintainer::shutdown::exit_code(
+                &e,
+                pg_maintainer::shutdown::is_requested(),
+            ))
         }
     }
 }
@@ -986,6 +1034,16 @@ async fn run() -> Result<u8> {
         ));
     }
 
+    if !(1..=pg_maintainer::config::MAX_SHUTDOWN_GRACE_SECONDS)
+        .contains(&args.shutdown_grace_seconds)
+    {
+        return Err(anyhow::anyhow!(
+            "--shutdown-grace-seconds ({}) must be between 1 and {}",
+            args.shutdown_grace_seconds,
+            pg_maintainer::config::MAX_SHUTDOWN_GRACE_SECONDS
+        ));
+    }
+
     // Parse the explicit table list up front so a typo fails before we connect.
     let also_tables = match args.also_tables {
         Some(ref entries) => pg_maintainer::types::ExplicitTable::parse_list(entries)
@@ -1035,30 +1093,48 @@ async fn run() -> Result<u8> {
         );
     }
 
-    // Set up graceful shutdown signal handlers (SIGTERM and Ctrl-C)
+    // Set up graceful shutdown signal handlers (SIGTERM and Ctrl-C). Each signal
+    // sets the shutdown flag right away (the phase loops stop at their next
+    // check) and is forwarded to the shutdown watcher, which may also cancel or
+    // terminate the running statement. Handlers keep listening, so a second
+    // signal escalates.
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-    let shutdown_tx_term = shutdown_tx.clone();
-    let shutdown_tx_int = shutdown_tx.clone();
+    let (signal_tx, signal_rx) = tokio::sync::mpsc::unbounded_channel::<&'static str>();
 
-    tokio::spawn(async move {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut sigterm) => {
-                sigterm.recv().await;
-                let _ = shutdown_tx_term.send(true);
+    {
+        let shutdown_tx = shutdown_tx.clone();
+        let signal_tx = signal_tx.clone();
+        tokio::spawn(async move {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut sigterm) => {
+                    while sigterm.recv().await.is_some() {
+                        pg_maintainer::shutdown::mark_requested();
+                        let _ = shutdown_tx.send(true);
+                        let _ = signal_tx.send("SIGTERM");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to setup SIGTERM handler: {e}");
+                }
             }
-            Err(e) => {
-                eprintln!("Failed to setup SIGTERM handler: {e}");
-            }
-        }
-    });
+        });
+    }
 
-    tokio::spawn(async move {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            eprintln!("Failed to setup SIGINT handler: {e}");
-        } else {
-            let _ = shutdown_tx_int.send(true);
-        }
-    });
+    {
+        let shutdown_tx = shutdown_tx.clone();
+        let signal_tx = signal_tx.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Err(e) = tokio::signal::ctrl_c().await {
+                    eprintln!("Failed to setup SIGINT handler: {e}");
+                    break;
+                }
+                pg_maintainer::shutdown::mark_requested();
+                let _ = shutdown_tx.send(true);
+                let _ = signal_tx.send("SIGINT");
+            }
+        });
+    }
 
     // Build connection config
     let conn_cfg = ConnectionConfig::from_args(
@@ -1115,6 +1191,31 @@ async fn run() -> Result<u8> {
         LogLevel::Success,
         &format!("Connected to database '{}'", conn_cfg.database),
     );
+
+    // Shutdown watcher: cancels/terminates the running statement on a signal.
+    // Spawned only now that a session exists to act on; earlier signals wait in
+    // the channel.
+    let backend_pid: i32 = client
+        .query_one(pg_maintainer::queries::GET_BACKEND_PID, &[])
+        .await
+        .context("Failed to read pg_backend_pid()")?
+        .get(0);
+    if args.shutdown_mode != ShutdownMode::Finish {
+        pg_maintainer::shutdown::spawn_shutdown_watcher(
+            pg_maintainer::shutdown::WatcherConfig {
+                mode: args.shutdown_mode,
+                grace: std::time::Duration::from_secs(args.shutdown_grace_seconds),
+                backend_pid,
+                connection_string: conn_string.clone(),
+                sslmode: conn_cfg.sslmode,
+                ssl_ca_cert: conn_cfg.ssl_ca_cert.clone(),
+                ssl_client_cert: conn_cfg.ssl_client_cert.clone(),
+                ssl_client_key: conn_cfg.ssl_client_key.clone(),
+            },
+            signal_rx,
+            logger.clone(),
+        );
+    }
 
     // Resolve schemas early so we can acquire the advisory lock before any maintenance work
     let schemas: Vec<String> = if args.discover_all_schemas && args.schema.is_none() {
@@ -1411,7 +1512,7 @@ async fn run() -> Result<u8> {
     let mut already_analyzed: HashSet<(String, String)> = HashSet::new();
 
     // ── Phase 1: VACUUM never-vacuumed tables ─────────────────────────────────
-    let vacuum_summary = if enabled_modes.contains(&Mode::NeverVacuumed) {
+    let vacuum_summary = if enabled_modes.contains(&Mode::NeverVacuumed) && !*shutdown_rx.borrow() {
         logger.log(LogLevel::Info, "═══ VACUUM (never vacuumed) ═══");
         logger.log(
             LogLevel::Info,
@@ -1446,13 +1547,17 @@ async fn run() -> Result<u8> {
     } else {
         logger.log(
             LogLevel::Info,
-            "Skipping VACUUM (never vacuumed) (not in --mode)",
+            &format!(
+                "Skipping VACUUM (never vacuumed) ({})",
+                skip_reason(enabled_modes.contains(&Mode::NeverVacuumed))
+            ),
         );
         Default::default()
     };
 
     // ── Phase 2: ANALYZE never-analyzed tables ────────────────────────────────
-    let analyze_summary = if enabled_modes.contains(&Mode::NeverAnalyzed) {
+    let analyze_summary = if enabled_modes.contains(&Mode::NeverAnalyzed) && !*shutdown_rx.borrow()
+    {
         logger.log(LogLevel::Info, "═══ ANALYZE (never analyzed) ═══");
         logger.log(
             LogLevel::Info,
@@ -1486,54 +1591,61 @@ async fn run() -> Result<u8> {
     } else {
         logger.log(
             LogLevel::Info,
-            "Skipping ANALYZE (never analyzed) (not in --mode)",
+            &format!(
+                "Skipping ANALYZE (never analyzed) ({})",
+                skip_reason(enabled_modes.contains(&Mode::NeverAnalyzed))
+            ),
         );
         Default::default()
     };
 
     // ── Phase 3: VACUUM FREEZE wraparound candidates ──────────────────────────
-    let freeze_summary = if enabled_modes.contains(&Mode::PreventWraparound) {
-        logger.log(
-            LogLevel::Info,
-            "═══ VACUUM FREEZE (wraparound candidates) ═══",
-        );
-        let candidates = operations::find_wraparound_candidates(
-            &client,
-            &schemas,
-            effective_wraparound_min_age,
-            table_filter,
-            min_bytes,
-            max_bytes,
-            limit_n,
-            args.order_by,
-        )
-        .await
-        .context("Failed to query wraparound candidates")?;
-        for t in &candidates {
-            already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
-            already_vacuumed.insert((t.schema_name.clone(), t.table_name.clone()));
-        }
-        operations::run_freeze_wraparound(
-            &client,
-            &candidates,
-            run_policy,
-            &logger,
-            &mut shutdown_rx,
-            vacuum_opts,
-            lag_gate.as_deref(),
-        )
-        .await
-        .context("VACUUM FREEZE phase failed")?
-    } else {
-        logger.log(
-            LogLevel::Info,
-            "Skipping VACUUM FREEZE (wraparound candidates) (not in --mode)",
-        );
-        Default::default()
-    };
+    let freeze_summary =
+        if enabled_modes.contains(&Mode::PreventWraparound) && !*shutdown_rx.borrow() {
+            logger.log(
+                LogLevel::Info,
+                "═══ VACUUM FREEZE (wraparound candidates) ═══",
+            );
+            let candidates = operations::find_wraparound_candidates(
+                &client,
+                &schemas,
+                effective_wraparound_min_age,
+                table_filter,
+                min_bytes,
+                max_bytes,
+                limit_n,
+                args.order_by,
+            )
+            .await
+            .context("Failed to query wraparound candidates")?;
+            for t in &candidates {
+                already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
+                already_vacuumed.insert((t.schema_name.clone(), t.table_name.clone()));
+            }
+            operations::run_freeze_wraparound(
+                &client,
+                &candidates,
+                run_policy,
+                &logger,
+                &mut shutdown_rx,
+                vacuum_opts,
+                lag_gate.as_deref(),
+            )
+            .await
+            .context("VACUUM FREEZE phase failed")?
+        } else {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "Skipping VACUUM FREEZE (wraparound candidates) ({})",
+                    skip_reason(enabled_modes.contains(&Mode::PreventWraparound))
+                ),
+            );
+            Default::default()
+        };
 
     // ── Phase 4: VACUUM bloat candidates ─────────────────────────────────────
-    let bloat_summary = if enabled_modes.contains(&Mode::PreventBloat) {
+    let bloat_summary = if enabled_modes.contains(&Mode::PreventBloat) && !*shutdown_rx.borrow() {
         logger.log(LogLevel::Info, "═══ VACUUM (bloat) ═══");
         logger.log(
             LogLevel::Info,
@@ -1573,12 +1685,20 @@ async fn run() -> Result<u8> {
         }
         summary
     } else {
-        logger.log(LogLevel::Info, "Skipping VACUUM (bloat) (not in --mode)");
+        logger.log(
+            LogLevel::Info,
+            &format!(
+                "Skipping VACUUM (bloat) ({})",
+                skip_reason(enabled_modes.contains(&Mode::PreventBloat))
+            ),
+        );
         Default::default()
     };
 
     // ── Phase 5: VACUUM needs-vacuum candidates ──────────────────────────────
-    let needs_vacuum_summary = if enabled_modes.contains(&Mode::NeedsVacuum) {
+    let needs_vacuum_summary = if enabled_modes.contains(&Mode::NeedsVacuum)
+        && !*shutdown_rx.borrow()
+    {
         logger.log(LogLevel::Info, "═══ VACUUM (needs vacuum) ═══");
 
         let (server_vacuum_threshold, server_vacuum_scale_factor) =
@@ -1748,100 +1868,117 @@ async fn run() -> Result<u8> {
     } else {
         logger.log(
             LogLevel::Info,
-            "Skipping VACUUM (needs vacuum) (not in --mode)",
+            &format!(
+                "Skipping VACUUM (needs vacuum) ({})",
+                skip_reason(enabled_modes.contains(&Mode::NeedsVacuum))
+            ),
         );
         Default::default()
     };
 
     // ── Phase 6: VACUUM overdue candidates ────────────────────────────────────
-    let vacuum_overdue_summary = if enabled_modes.contains(&Mode::VacuumOverdue) {
-        let older_than_days = args.vacuum_older_than_days.unwrap() as i32;
-        logger.log(
-            LogLevel::Info,
-            &format!("═══ VACUUM (not vacuumed in {older_than_days} days) ═══"),
-        );
-        logger.log(
-            LogLevel::Info,
-            &format!("Searching for tables not vacuumed in {older_than_days} days..."),
-        );
-        let candidates = operations::find_vacuum_overdue_candidates(
-            &client,
-            &schemas,
-            table_filter,
-            older_than_days,
-            min_bytes,
-            max_bytes,
-            limit_n,
-        )
-        .await
-        .context("Failed to query vacuum-overdue candidates")?;
-        let summary = operations::run_vacuum_overdue(
-            &client,
-            &candidates,
-            run_policy,
-            &already_vacuumed,
-            &logger,
-            &mut shutdown_rx,
-            vacuum_opts,
-            lag_gate.as_deref(),
-        )
-        .await
-        .context("VACUUM OVERDUE phase failed")?;
-        for t in &candidates {
-            already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
-        }
-        summary
-    } else {
-        logger.log(LogLevel::Info, "Skipping VACUUM (overdue) (not in --mode)");
-        Default::default()
-    };
+    let vacuum_overdue_summary =
+        if enabled_modes.contains(&Mode::VacuumOverdue) && !*shutdown_rx.borrow() {
+            let older_than_days = args.vacuum_older_than_days.unwrap() as i32;
+            logger.log(
+                LogLevel::Info,
+                &format!("═══ VACUUM (not vacuumed in {older_than_days} days) ═══"),
+            );
+            logger.log(
+                LogLevel::Info,
+                &format!("Searching for tables not vacuumed in {older_than_days} days..."),
+            );
+            let candidates = operations::find_vacuum_overdue_candidates(
+                &client,
+                &schemas,
+                table_filter,
+                older_than_days,
+                min_bytes,
+                max_bytes,
+                limit_n,
+            )
+            .await
+            .context("Failed to query vacuum-overdue candidates")?;
+            let summary = operations::run_vacuum_overdue(
+                &client,
+                &candidates,
+                run_policy,
+                &already_vacuumed,
+                &logger,
+                &mut shutdown_rx,
+                vacuum_opts,
+                lag_gate.as_deref(),
+            )
+            .await
+            .context("VACUUM OVERDUE phase failed")?;
+            for t in &candidates {
+                already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
+            }
+            summary
+        } else {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "Skipping VACUUM (overdue) ({})",
+                    skip_reason(enabled_modes.contains(&Mode::VacuumOverdue))
+                ),
+            );
+            Default::default()
+        };
 
     // ── Phase 7: ANALYZE overdue candidates ───────────────────────────────────
-    let analyze_overdue_summary = if enabled_modes.contains(&Mode::AnalyzeOverdue) {
-        let older_than_days = args.analyze_older_than_days.unwrap() as i32;
-        logger.log(
-            LogLevel::Info,
-            &format!("═══ ANALYZE (not analyzed in {older_than_days} days) ═══"),
-        );
-        logger.log(
-            LogLevel::Info,
-            &format!("Searching for tables not analyzed in {older_than_days} days..."),
-        );
-        let candidates = operations::find_analyze_overdue_candidates(
-            &client,
-            &schemas,
-            table_filter,
-            older_than_days,
-            min_bytes,
-            max_bytes,
-            limit_n,
-        )
-        .await
-        .context("Failed to query analyze-overdue candidates")?;
-        let summary = operations::run_analyze_overdue(
-            &client,
-            &candidates,
-            run_policy,
-            &already_analyzed,
-            &logger,
-            &mut shutdown_rx,
-            lag_gate.as_deref(),
-        )
-        .await
-        .context("ANALYZE OVERDUE phase failed")?;
-        for t in &candidates {
-            already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
-        }
-        summary
-    } else {
-        logger.log(LogLevel::Info, "Skipping ANALYZE (overdue) (not in --mode)");
-        Default::default()
-    };
+    let analyze_overdue_summary =
+        if enabled_modes.contains(&Mode::AnalyzeOverdue) && !*shutdown_rx.borrow() {
+            let older_than_days = args.analyze_older_than_days.unwrap() as i32;
+            logger.log(
+                LogLevel::Info,
+                &format!("═══ ANALYZE (not analyzed in {older_than_days} days) ═══"),
+            );
+            logger.log(
+                LogLevel::Info,
+                &format!("Searching for tables not analyzed in {older_than_days} days..."),
+            );
+            let candidates = operations::find_analyze_overdue_candidates(
+                &client,
+                &schemas,
+                table_filter,
+                older_than_days,
+                min_bytes,
+                max_bytes,
+                limit_n,
+            )
+            .await
+            .context("Failed to query analyze-overdue candidates")?;
+            let summary = operations::run_analyze_overdue(
+                &client,
+                &candidates,
+                run_policy,
+                &already_analyzed,
+                &logger,
+                &mut shutdown_rx,
+                lag_gate.as_deref(),
+            )
+            .await
+            .context("ANALYZE OVERDUE phase failed")?;
+            for t in &candidates {
+                already_handled.insert((t.schema_name.clone(), t.table_name.clone()));
+            }
+            summary
+        } else {
+            logger.log(
+                LogLevel::Info,
+                &format!(
+                    "Skipping ANALYZE (overdue) ({})",
+                    skip_reason(enabled_modes.contains(&Mode::AnalyzeOverdue))
+                ),
+            );
+            Default::default()
+        };
 
     // ── Phase 8: VACUUM (ANALYZE) explicitly listed tables ───────────────────
     // Runs after whichever modes were selected, in addition to them — it is not a
     // --mode value.
-    let also_tables_summary = if !also_tables.is_empty() {
+    let also_tables_summary = if !also_tables.is_empty() && !*shutdown_rx.borrow() {
         logger.log(LogLevel::Info, "═══ VACUUM (ANALYZE) (--also-tables) ═══");
         operations::run_also_tables(
             &client,

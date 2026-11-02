@@ -96,6 +96,28 @@ Not done: pg-maintainer does not reconnect or resume. Re-run it; candidates are 
 | 3 | Database connection lost; run aborted |
 | 130 | Stopped by SIGINT/SIGTERM |
 
+### Signals and shutdown
+
+On SIGTERM or SIGINT the run stops before the next table. What happens to the statement that is already running is set by `--shutdown-mode`:
+
+| Mode | Behavior |
+|---|---|
+| `cancel` (default) | `pg_cancel_backend` on the running VACUUM/ANALYZE; if the same statement is still running after `--shutdown-grace-seconds` (default 10, range 1-300), `pg_terminate_backend` |
+| `terminate` | `pg_terminate_backend` immediately |
+| `finish` | Legacy behavior: let the current statement complete, then stop |
+
+```
+[WARN] Shutdown requested (SIGTERM): cancelling running statement on backend PID 4121 via pg_cancel_backend; will pg_terminate_backend after 10s. Send the signal again to terminate immediately.
+```
+
+- **Send the signal twice** to skip the grace period and terminate at once.
+- Only a running VACUUM or ANALYZE is acted on. If the session is idle (between tables, or waiting on replica lag) nothing is cancelled and the run just stops, so the logbook and the summary still complete.
+- The cancel and terminate calls are issued over a short-lived second connection (5s connect timeout) using the same connection settings, so one extra connection slot is needed during shutdown. If it cannot be opened, a warning is logged and the run falls back to `finish`.
+- The role needs no extra privileges: a role can cancel and terminate its own backends.
+- An interrupted table is counted as skipped and recorded in the logbook with status `cancelled` (when the session survived). A cancelled VACUUM is safe to re-run; it loses only the work in progress.
+- Remaining phases are skipped, and the exit code is 130, not 3, even though the session was cancelled or terminated.
+- **Kubernetes:** set `terminationGracePeriodSeconds` larger than `--shutdown-grace-seconds`, otherwise the pod is SIGKILLed before the escalation.
+
 ## Installation
 
 ### From source

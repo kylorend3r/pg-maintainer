@@ -1569,6 +1569,122 @@ lock-timeout-ms = 0
         .stderr(predicate::str::contains("--lock-timeout-ms"));
 }
 
+// ── Shutdown (--shutdown-mode / --shutdown-grace-seconds) ────────────────────
+
+#[test]
+fn test_shutdown_options_default_and_modes_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dry-run")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+
+    for mode in ["finish", "cancel", "terminate"] {
+        cmd()
+            .arg("--schema")
+            .arg("public")
+            .arg("--shutdown-mode")
+            .arg(mode)
+            .arg("--dry-run")
+            .env_clear()
+            .assert()
+            .code(predicate::ne(2));
+    }
+}
+
+#[test]
+fn test_shutdown_mode_invalid_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--shutdown-mode")
+        .arg("kill")
+        .env_clear()
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn test_shutdown_grace_seconds_out_of_range_rejected() {
+    for v in ["0", "301"] {
+        cmd()
+            .arg("--schema")
+            .arg("public")
+            .arg("--mode")
+            .arg("never-vacuumed")
+            .arg("--shutdown-grace-seconds")
+            .arg(v)
+            .env_clear()
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("--shutdown-grace-seconds"))
+            .stderr(predicate::str::contains("between 1 and 300"));
+    }
+}
+
+#[test]
+fn test_shutdown_grace_seconds_accepted() {
+    for v in ["1", "10", "300"] {
+        cmd()
+            .arg("--schema")
+            .arg("public")
+            .arg("--shutdown-grace-seconds")
+            .arg(v)
+            .arg("--dry-run")
+            .env_clear()
+            .assert()
+            .code(predicate::ne(2));
+    }
+}
+
+#[test]
+fn test_config_file_with_shutdown_keys() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+mode = ["never-vacuumed"]
+shutdown-mode = "terminate"
+shutdown-grace-seconds = 30
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2))
+        .stderr(predicate::str::contains("--shutdown").not());
+}
+
+#[test]
+fn test_config_file_with_invalid_shutdown_grace_rejected() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+mode = ["never-vacuumed"]
+shutdown-grace-seconds = 0
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--shutdown-grace-seconds"));
+}
+
 // ── Connection string (--dsn / PG_DSN) ─────────────────────────────────────────
 
 #[test]

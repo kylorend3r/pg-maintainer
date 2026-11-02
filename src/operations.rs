@@ -657,17 +657,66 @@ fn lock_timeout_skip_message(policy: RunPolicy, schema: &str, table: &str) -> St
 enum OpErrorKind {
     LockTimeout,
     ConnectionLost,
+    /// The statement was cancelled or its session terminated because a shutdown
+    /// was requested (pg_cancel_backend / pg_terminate_backend).
+    ShutdownInterrupted,
     Other,
 }
 
-/// Classify a table-operation error. A lost connection takes priority.
-fn classify_op_error(e: &tokio_postgres::Error) -> OpErrorKind {
-    if db_error::is_connection_lost_pg(e) {
+/// Classify a table-operation error. With a shutdown requested, a cancelled
+/// statement or a dropped session is the expected outcome and takes priority
+/// over the lost-connection handling.
+fn classify_op_error(e: &tokio_postgres::Error, shutdown_requested: bool) -> OpErrorKind {
+    let lost = db_error::is_connection_lost_pg(e);
+    if shutdown_requested && (lost || e.code() == Some(&SqlState::QUERY_CANCELED)) {
+        OpErrorKind::ShutdownInterrupted
+    } else if lost {
         OpErrorKind::ConnectionLost
     } else if is_lock_timeout(e) {
         OpErrorKind::LockTimeout
     } else {
         OpErrorKind::Other
+    }
+}
+
+/// Record a table whose statement was stopped by a shutdown. The logbook row is
+/// written only if the session survived (a cancel keeps it, a terminate does not).
+#[allow(clippy::too_many_arguments)]
+async fn handle_shutdown_interrupt(
+    client: &Client,
+    logger: &Logger,
+    policy: RunPolicy,
+    summary: &mut OperationSummary,
+    schema: &str,
+    table: &str,
+    operation: &str,
+    mode: &str,
+    duration_ms: i64,
+) {
+    logger.log(
+        LogLevel::Warning,
+        &format!(
+            "\"{schema}\".\"{table}\" interrupted by shutdown (statement cancelled); safe to re-run"
+        ),
+    );
+    summary.skipped += 1;
+    if !client.is_closed() {
+        log_maintenance_operation(
+            client,
+            policy.dry_run,
+            LogEntry {
+                schema,
+                table,
+                operation,
+                mode,
+                status: "cancelled",
+                dead_tuples_before: None,
+                dead_tuples_reduced_approx: None,
+                duration_ms,
+                error_message: Some("cancelled by shutdown"),
+            },
+        )
+        .await;
     }
 }
 
@@ -720,7 +769,8 @@ where
             Ok(result) => return Ok(result),
             Err(e) => e,
         };
-        if !is_lock_timeout(&err) || attempt >= policy.lock_timeout_retries {
+        if !is_lock_timeout(&err) || attempt >= policy.lock_timeout_retries || *shutdown_rx.borrow()
+        {
             return Err(err);
         }
         attempt += 1;
@@ -1170,17 +1220,35 @@ pub async fn run_vacuum_never_vacuumed(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
-                    return Err(connection_lost_error(
-                        logger,
-                        OP_VACUUM,
-                        &t.schema_name,
-                        &t.table_name,
-                        Some((i + 1, tables.len())),
-                        &db_error::describe_pg_error(&e),
-                    ));
-                }
                 let duration_ms = start.elapsed().as_millis() as i64;
+                match classify_op_error(&e, *shutdown_rx.borrow()) {
+                    OpErrorKind::ConnectionLost => {
+                        return Err(connection_lost_error(
+                            logger,
+                            OP_VACUUM,
+                            &t.schema_name,
+                            &t.table_name,
+                            Some((i + 1, tables.len())),
+                            &db_error::describe_pg_error(&e),
+                        ));
+                    }
+                    OpErrorKind::ShutdownInterrupted => {
+                        handle_shutdown_interrupt(
+                            client,
+                            logger,
+                            policy,
+                            &mut summary,
+                            &t.schema_name,
+                            &t.table_name,
+                            "VACUUM",
+                            "never-vacuumed",
+                            duration_ms,
+                        )
+                        .await;
+                        break;
+                    }
+                    OpErrorKind::LockTimeout | OpErrorKind::Other => {}
+                }
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
@@ -1357,17 +1425,35 @@ pub async fn run_analyze_never_analyzed(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
-                    return Err(connection_lost_error(
-                        logger,
-                        OP_ANALYZE,
-                        &t.schema_name,
-                        &t.table_name,
-                        Some((i + 1, tables.len())),
-                        &db_error::describe_pg_error(&e),
-                    ));
-                }
                 let duration_ms = start.elapsed().as_millis() as i64;
+                match classify_op_error(&e, *shutdown_rx.borrow()) {
+                    OpErrorKind::ConnectionLost => {
+                        return Err(connection_lost_error(
+                            logger,
+                            OP_ANALYZE,
+                            &t.schema_name,
+                            &t.table_name,
+                            Some((i + 1, tables.len())),
+                            &db_error::describe_pg_error(&e),
+                        ));
+                    }
+                    OpErrorKind::ShutdownInterrupted => {
+                        handle_shutdown_interrupt(
+                            client,
+                            logger,
+                            policy,
+                            &mut summary,
+                            &t.schema_name,
+                            &t.table_name,
+                            "ANALYZE",
+                            "never-analyzed",
+                            duration_ms,
+                        )
+                        .await;
+                        break;
+                    }
+                    OpErrorKind::LockTimeout | OpErrorKind::Other => {}
+                }
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
@@ -1586,17 +1672,35 @@ pub async fn run_freeze_wraparound(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
-                    return Err(connection_lost_error(
-                        logger,
-                        OP_FREEZE,
-                        &t.schema_name,
-                        &t.table_name,
-                        Some((i + 1, tables.len())),
-                        &db_error::describe_pg_error(&e),
-                    ));
-                }
                 let duration_ms = start.elapsed().as_millis() as i64;
+                match classify_op_error(&e, *shutdown_rx.borrow()) {
+                    OpErrorKind::ConnectionLost => {
+                        return Err(connection_lost_error(
+                            logger,
+                            OP_FREEZE,
+                            &t.schema_name,
+                            &t.table_name,
+                            Some((i + 1, tables.len())),
+                            &db_error::describe_pg_error(&e),
+                        ));
+                    }
+                    OpErrorKind::ShutdownInterrupted => {
+                        handle_shutdown_interrupt(
+                            client,
+                            logger,
+                            policy,
+                            &mut summary,
+                            &t.schema_name,
+                            &t.table_name,
+                            "FREEZE",
+                            "prevent-wraparound",
+                            duration_ms,
+                        )
+                        .await;
+                        break;
+                    }
+                    OpErrorKind::LockTimeout | OpErrorKind::Other => {}
+                }
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
@@ -1802,17 +1906,35 @@ pub async fn run_bloat_vacuum(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
-                    return Err(connection_lost_error(
-                        logger,
-                        OP_BLOAT,
-                        &t.schema_name,
-                        &t.table_name,
-                        Some((i + 1, tables.len())),
-                        &db_error::describe_pg_error(&e),
-                    ));
-                }
                 let duration_ms = start.elapsed().as_millis() as i64;
+                match classify_op_error(&e, *shutdown_rx.borrow()) {
+                    OpErrorKind::ConnectionLost => {
+                        return Err(connection_lost_error(
+                            logger,
+                            OP_BLOAT,
+                            &t.schema_name,
+                            &t.table_name,
+                            Some((i + 1, tables.len())),
+                            &db_error::describe_pg_error(&e),
+                        ));
+                    }
+                    OpErrorKind::ShutdownInterrupted => {
+                        handle_shutdown_interrupt(
+                            client,
+                            logger,
+                            policy,
+                            &mut summary,
+                            &t.schema_name,
+                            &t.table_name,
+                            "VACUUM",
+                            "prevent-bloat",
+                            duration_ms,
+                        )
+                        .await;
+                        break;
+                    }
+                    OpErrorKind::LockTimeout | OpErrorKind::Other => {}
+                }
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
@@ -2032,17 +2154,35 @@ pub async fn run_needs_vacuum(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
-                    return Err(connection_lost_error(
-                        logger,
-                        OP_NEEDS_VACUUM,
-                        &t.schema_name,
-                        &t.table_name,
-                        Some((i + 1, tables.len())),
-                        &db_error::describe_pg_error(&e),
-                    ));
-                }
                 let duration_ms = start.elapsed().as_millis() as i64;
+                match classify_op_error(&e, *shutdown_rx.borrow()) {
+                    OpErrorKind::ConnectionLost => {
+                        return Err(connection_lost_error(
+                            logger,
+                            OP_NEEDS_VACUUM,
+                            &t.schema_name,
+                            &t.table_name,
+                            Some((i + 1, tables.len())),
+                            &db_error::describe_pg_error(&e),
+                        ));
+                    }
+                    OpErrorKind::ShutdownInterrupted => {
+                        handle_shutdown_interrupt(
+                            client,
+                            logger,
+                            policy,
+                            &mut summary,
+                            &t.schema_name,
+                            &t.table_name,
+                            "VACUUM",
+                            "needs-vacuum",
+                            duration_ms,
+                        )
+                        .await;
+                        break;
+                    }
+                    OpErrorKind::LockTimeout | OpErrorKind::Other => {}
+                }
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
@@ -2231,17 +2371,35 @@ pub async fn run_vacuum_overdue(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
-                    return Err(connection_lost_error(
-                        logger,
-                        OP_VACUUM_OVERDUE,
-                        &t.schema_name,
-                        &t.table_name,
-                        Some((i + 1, tables.len())),
-                        &db_error::describe_pg_error(&e),
-                    ));
-                }
                 let duration_ms = start.elapsed().as_millis() as i64;
+                match classify_op_error(&e, *shutdown_rx.borrow()) {
+                    OpErrorKind::ConnectionLost => {
+                        return Err(connection_lost_error(
+                            logger,
+                            OP_VACUUM_OVERDUE,
+                            &t.schema_name,
+                            &t.table_name,
+                            Some((i + 1, tables.len())),
+                            &db_error::describe_pg_error(&e),
+                        ));
+                    }
+                    OpErrorKind::ShutdownInterrupted => {
+                        handle_shutdown_interrupt(
+                            client,
+                            logger,
+                            policy,
+                            &mut summary,
+                            &t.schema_name,
+                            &t.table_name,
+                            "VACUUM",
+                            "vacuum-overdue",
+                            duration_ms,
+                        )
+                        .await;
+                        break;
+                    }
+                    OpErrorKind::LockTimeout | OpErrorKind::Other => {}
+                }
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
@@ -2429,17 +2587,35 @@ pub async fn run_analyze_overdue(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
-                    return Err(connection_lost_error(
-                        logger,
-                        OP_ANALYZE_OVERDUE,
-                        &t.schema_name,
-                        &t.table_name,
-                        Some((i + 1, tables.len())),
-                        &db_error::describe_pg_error(&e),
-                    ));
-                }
                 let duration_ms = start.elapsed().as_millis() as i64;
+                match classify_op_error(&e, *shutdown_rx.borrow()) {
+                    OpErrorKind::ConnectionLost => {
+                        return Err(connection_lost_error(
+                            logger,
+                            OP_ANALYZE_OVERDUE,
+                            &t.schema_name,
+                            &t.table_name,
+                            Some((i + 1, tables.len())),
+                            &db_error::describe_pg_error(&e),
+                        ));
+                    }
+                    OpErrorKind::ShutdownInterrupted => {
+                        handle_shutdown_interrupt(
+                            client,
+                            logger,
+                            policy,
+                            &mut summary,
+                            &t.schema_name,
+                            &t.table_name,
+                            "ANALYZE",
+                            "analyze-overdue",
+                            duration_ms,
+                        )
+                        .await;
+                        break;
+                    }
+                    OpErrorKind::LockTimeout | OpErrorKind::Other => {}
+                }
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
@@ -3245,17 +3421,35 @@ pub async fn run_also_tables(
                 summary.succeeded += 1;
             }
             Err(e) => {
-                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
-                    return Err(connection_lost_error(
-                        logger,
-                        OP_VACUUM_ANALYZE,
-                        &t.schema_name,
-                        &t.table_name,
-                        Some((i + 1, tables.len())),
-                        &db_error::describe_pg_error(&e),
-                    ));
-                }
                 let duration_ms = start.elapsed().as_millis() as i64;
+                match classify_op_error(&e, *shutdown_rx.borrow()) {
+                    OpErrorKind::ConnectionLost => {
+                        return Err(connection_lost_error(
+                            logger,
+                            OP_VACUUM_ANALYZE,
+                            &t.schema_name,
+                            &t.table_name,
+                            Some((i + 1, tables.len())),
+                            &db_error::describe_pg_error(&e),
+                        ));
+                    }
+                    OpErrorKind::ShutdownInterrupted => {
+                        handle_shutdown_interrupt(
+                            client,
+                            logger,
+                            policy,
+                            &mut summary,
+                            &t.schema_name,
+                            &t.table_name,
+                            OP_VACUUM_ANALYZE,
+                            "also-tables",
+                            duration_ms,
+                        )
+                        .await;
+                        break;
+                    }
+                    OpErrorKind::LockTimeout | OpErrorKind::Other => {}
+                }
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
