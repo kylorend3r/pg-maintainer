@@ -74,6 +74,28 @@ The dead-tuple figure in the logs is **approximate**. It is the difference betwe
 
 The `maintainer_logbook.maintenance_logbook` columns `dead_tuples_before` and `dead_tuples_removed` keep their names (renaming would break existing queries) but hold these approximate values; the column comments say so.
 
+### Connection loss
+
+If the connection to the server dies mid-run (the backend is terminated, the server restarts or crashes, the network drops), pg-maintainer stops immediately instead of counting a failure for every remaining table. It logs one error naming the operation, table and position, flushes the log file, and exits with code 3:
+
+```
+[ERROR] Database connection lost during VACUUM on "public"."big" (table 2/5): connection closed. Remaining tables and phases were NOT processed. The advisory lock was released with the session; re-running is safe (candidates are re-discovered).
+```
+
+Detection covers SQLSTATE class 08 and `57P01`/`57P02`/`57P03`/`57P05`, closed or reset sockets, and a closed client checked before each table. A statement timeout or lock timeout is **not** a lost connection. TCP keepalives (30s idle, 10s interval, 3 retries) are enabled so a silently dropped peer is noticed too.
+
+Not done: pg-maintainer does not reconnect or resume. Re-run it; candidates are discovered again.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Completed, no failures |
+| 1 | One or more tables failed, or any other fatal error |
+| 2 | Command-line usage error (clap) |
+| 3 | Database connection lost; run aborted |
+| 130 | Stopped by SIGINT/SIGTERM |
+
 ## Installation
 
 ### From source
