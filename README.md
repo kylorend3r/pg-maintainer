@@ -46,7 +46,7 @@ Every mode is opt-in — none run unless selected. `--mode` is required (via the
 
 ### Vacuum-Horizon Diagnostics
 
-VACUUM can only reclaim dead tuples older than every transaction that might still need them — that boundary is the xmin horizon. If something pins the horizon back (a long-running transaction, an inactive replication slot, or an unresolved prepared transaction), VACUUM reports "0 dead tuples removed" even on heavily bloated tables.
+VACUUM can only reclaim dead tuples older than every transaction that might still need them — that boundary is the xmin horizon. If something pins the horizon back (a long-running transaction, an inactive replication slot, or an unresolved prepared transaction), VACUUM cannot reduce the dead-tuple count even on heavily bloated tables.
 
 Before any phases run, pg-maintainer checks for horizon blockers and logs them:
 
@@ -55,13 +55,24 @@ Before any phases run, pg-maintainer checks for horizon blockers and logs them:
 [WARNING] Vacuum horizon may be pinned: backend PID 1822 (app_worker), idle in transaction 6h12m (oldest XID age: 2,547,821)
 ```
 
-Per-table, when VACUUM removes 0 dead tuples, the log enriches the "0 removed" warning with the actual blocker:
+Per-table, when the estimated dead-tuple count does not decrease after a VACUUM, the log enriches the warning with the actual blocker:
 
 ```
-[WARNING] VACUUM on "public"."huge_table" removed 0 dead tuples — blocked by: replication slot 'logical_slot' (logical, active: f), XID age 2.5M
+[WARNING] VACUUM on "public"."huge_table": estimated dead tuples did not decrease (approx., based on pg_stat_user_tables.n_dead_tup before/after; …) — blocked by: replication slot 'logical_slot' (logical, active: f), XID age 2.5M
 ```
 
 Use `--skip-xmin-horizon-check` to disable the check entirely, or `--xmin-horizon-warn-age` to tune the threshold above which horizon blockers are logged as a warning (default: 1M XIDs).
+
+### Reading the dead-tuple numbers
+
+The dead-tuple figure in the logs is **approximate**. It is the difference between two reads of `pg_stat_user_tables.n_dead_tup`, taken before and after the VACUUM. That column is a statistics estimate, not a count of tuples VACUUM physically removed, so the figure can be off because:
+
+- `n_dead_tup` is itself an estimate, and statistics are updated asynchronously.
+- Concurrent INSERT/UPDATE/DELETE during the VACUUM add new dead tuples, so the figure understates what was cleaned.
+- Autovacuum or another session may clean the table between the two reads, so work is misattributed to this run.
+- If the table had no dead tuples before, no figure is reported at all, which is not the same as "zero reduced".
+
+The `maintainer_logbook.maintenance_logbook` columns `dead_tuples_before` and `dead_tuples_removed` keep their names (renaming would break existing queries) but hold these approximate values; the column comments say so.
 
 ## Installation
 

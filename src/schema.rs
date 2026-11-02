@@ -34,6 +34,12 @@ const CREATE_INDEX_TIME_SQL: &str = r#"
         ON maintainer_logbook.maintenance_logbook (logged_at)
 "#;
 
+const COMMENT_BEFORE_SQL: &str = "COMMENT ON COLUMN maintainer_logbook.maintenance_logbook.dead_tuples_before IS \
+    'Approximate: pg_stat_user_tables.n_dead_tup read before the operation (a statistics estimate)'";
+
+const COMMENT_REMOVED_SQL: &str = "COMMENT ON COLUMN maintainer_logbook.maintenance_logbook.dead_tuples_removed IS \
+    'Approximate: decrease in the n_dead_tup estimate across the operation, not an exact count of removed tuples'";
+
 /// Check if a schema exists in the target database.
 async fn schema_exists(client: &Client, schema_name: &str) -> Result<bool> {
     let row = client
@@ -74,6 +80,10 @@ pub async fn ensure_logbook_schema(client: &Client) -> Result<bool> {
         .execute(CREATE_INDEX_TIME_SQL, &[])
         .await
         .context("Failed to create logbook timestamp index")?;
+
+    // Best-effort: the logbook may be owned by another role, which must not fail the run.
+    let _ = client.execute(COMMENT_BEFORE_SQL, &[]).await;
+    let _ = client.execute(COMMENT_REMOVED_SQL, &[]).await;
 
     Ok(!exists)
 }
