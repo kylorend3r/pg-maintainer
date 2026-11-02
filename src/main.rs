@@ -374,6 +374,18 @@ struct Args {
     #[arg(long, action = clap::ArgAction::Set)]
     vacuum_index_cleanup: Option<bool>,
 
+    /// Add PARALLEL n to every VACUUM (0 disables parallel index vacuuming).
+    /// Default: omitted — PostgreSQL decides, up to the session's
+    /// max_parallel_maintenance_workers. Only the index vacuum/cleanup phases
+    /// are parallelized, and the helper count is bounded by the number of
+    /// eligible indexes minus one.
+    #[arg(
+        long,
+        value_name = "N",
+        help = "Add PARALLEL N to VACUUM, 0-1024 (default: omitted)"
+    )]
+    vacuum_parallel: Option<u32>,
+
     // ── Config file ──────────────────────────────────────────────────────────
     /// Path to a TOML configuration file. CLI arguments take precedence.
     #[arg(short = 'C', long, value_name = "FILE")]
@@ -435,6 +447,7 @@ struct Config {
     vacuum_disable_page_skipping: Option<bool>,
     vacuum_skip_locked: Option<bool>,
     vacuum_index_cleanup: Option<bool>,
+    vacuum_parallel: Option<u32>,
 }
 
 fn resolve_env_interpolation(value: Option<String>) -> Option<String> {
@@ -659,6 +672,9 @@ fn merge_config(file: Config, mut args: Args) -> Args {
     }
     if args.vacuum_index_cleanup.is_none() {
         args.vacuum_index_cleanup = file.vacuum_index_cleanup;
+    }
+    if args.vacuum_parallel.is_none() {
+        args.vacuum_parallel = file.vacuum_parallel;
     }
 
     args
@@ -917,6 +933,15 @@ async fn main() -> Result<()> {
         return Err(anyhow::anyhow!(
             "--xmin-horizon-warn-age ({}) must be >= 0",
             args.xmin_horizon_warn_age
+        ));
+    }
+
+    if let Some(n) = args.vacuum_parallel
+        && n > pg_maintainer::config::MAX_VACUUM_PARALLEL
+    {
+        return Err(anyhow::anyhow!(
+            "--vacuum-parallel ({n}) must be between 0 and {}",
+            pg_maintainer::config::MAX_VACUUM_PARALLEL
         ));
     }
 
@@ -1210,17 +1235,48 @@ async fn main() -> Result<()> {
         ),
     }
 
-    // Set max_parallel_maintenance_workers to match the server's max_parallel_workers,
-    // so VACUUM's index-cleanup phase can use the full parallel worker pool
-    // (no effect on Phase 3/freeze, which runs with INDEX_CLEANUP FALSE).
-    match connection::set_max_parallel_maintenance_workers(&client).await {
+    // Set max_parallel_maintenance_workers: by default the server's whole
+    // max_parallel_workers pool, so VACUUM's index-cleanup phase can use it
+    // (no effect on Phase 3/freeze, which runs with INDEX_CLEANUP FALSE). With
+    // --vacuum-parallel N it is min(N, max_parallel_workers) instead.
+    match connection::set_max_parallel_maintenance_workers(&client, args.vacuum_parallel).await {
         Ok(workers) => {
-            logger.log(
-                LogLevel::Info,
-                &format!(
-                    "max_parallel_maintenance_workers set to {workers} (matches max_parallel_workers)"
+            match args.vacuum_parallel {
+                None => logger.log(
+                    LogLevel::Info,
+                    &format!(
+                        "max_parallel_maintenance_workers set to {workers} (matches max_parallel_workers)"
+                    ),
                 ),
-            );
+                Some(requested) => {
+                    let limits = client
+                        .query_one(
+                            "SELECT current_setting('max_parallel_workers'), \
+                                    current_setting('max_worker_processes')",
+                            &[],
+                        )
+                        .await;
+                    let (max_pw, max_wp) = match limits {
+                        Ok(row) => (row.get::<_, String>(0), row.get::<_, String>(1)),
+                        Err(_) => ("?".to_string(), "?".to_string()),
+                    };
+                    logger.log(
+                        LogLevel::Info,
+                        &format!(
+                            "VACUUM PARALLEL {requested} requested; max_parallel_maintenance_workers set to {workers} \
+                             (server max_parallel_workers={max_pw}, max_worker_processes={max_wp})"
+                        ),
+                    );
+                    if i64::from(requested) > i64::from(workers) {
+                        logger.log(
+                            LogLevel::Warning,
+                            &format!(
+                                "--vacuum-parallel {requested} exceeds max_parallel_workers; effective cap is {workers}"
+                            ),
+                        );
+                    }
+                }
+            }
             if throttle.is_active() && workers > 0 {
                 logger.log(
                     LogLevel::Warning,
@@ -1331,6 +1387,7 @@ async fn main() -> Result<()> {
         disable_page_skipping: args.vacuum_disable_page_skipping,
         skip_locked: args.vacuum_skip_locked,
         index_cleanup: args.vacuum_index_cleanup,
+        parallel: args.vacuum_parallel,
     };
 
     let mut already_handled: HashSet<(String, String)> = HashSet::new();

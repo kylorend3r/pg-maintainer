@@ -177,6 +177,26 @@ pg-maintainer -d mydb -s public --mode prevent-bloat --log-rotation daily
 pg-maintainer --dsn "postgres://user@host:5432/mydb" -C config.toml
 ```
 
+### Parallel VACUUM
+
+By default PostgreSQL decides how many parallel workers a VACUUM uses, up to the session's `max_parallel_maintenance_workers` (which pg-maintainer sets to the server's `max_parallel_workers`). `--vacuum-parallel N` adds an explicit `PARALLEL N` to every VACUUM the tool issues and caps `max_parallel_maintenance_workers` at `min(N, max_parallel_workers)`:
+
+```bash
+pg-maintainer -d mydb -s public --mode needs-vacuum --vacuum-parallel 4
+```
+
+What `PARALLEL` does and does not do:
+
+- It parallelizes only the index vacuum and index cleanup phases. The heap scan is not parallelized.
+- An index is processed by one process and the leader takes one itself, so helper workers are bounded by (eligible indexes − 1). A table with 3 eligible indexes uses at most 2 helpers regardless of `PARALLEL 8`.
+- Only indexes at least `min_parallel_index_scan_size` and whose access method supports parallel vacuum are eligible.
+- Workers come out of the `max_parallel_workers` / `max_worker_processes` pool that query parallelism also uses; on a busy primary this is the real cost, which is why the clause is opt-in.
+- `PARALLEL 0` disables parallel vacuum.
+- It has no effect when `INDEX_CLEANUP FALSE`, which `prevent-wraparound` uses by default; combine with `--vacuum-index-cleanup true` if you want it there.
+- Expect a benefit on large tables with many indexes, not on heap-dominated tables with 0 or 1 indexes.
+
+Cost-based throttling (`--gentle`, `--vacuum-cost-delay-ms`) shares one budget across all workers, so extra workers do not speed up a throttled run.
+
 ## Environment Variables
 
 ```bash
