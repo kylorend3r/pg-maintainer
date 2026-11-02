@@ -1,3 +1,4 @@
+use crate::db_error::{self, ConnectionLost};
 use crate::logging::{LogContext, LogLevel, Logger};
 use crate::queries;
 use crate::types::{
@@ -6,7 +7,7 @@ use crate::types::{
     VacuumOptions, XminHorizonBlocker,
 };
 use crate::vacuum_output;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Instant;
@@ -46,7 +47,7 @@ pub async fn try_acquire_schema_lock(client: &Client, schemas: &[String]) -> Res
     let row = client
         .query_one("SELECT hashtext($1)::int AS lock_id", &[&schemas_str])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to compute schema lock ID: {e}"))?;
+        .context("Failed to compute schema lock ID")?;
 
     let lock_id: i32 = row.get("lock_id");
 
@@ -57,7 +58,7 @@ pub async fn try_acquire_schema_lock(client: &Client, schemas: &[String]) -> Res
             &[&lock_id],
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to acquire advisory lock: {e}"))?;
+        .context("Failed to acquire advisory lock")?;
 
     let acquired: bool = row.get("acquired");
     if !acquired {
@@ -122,7 +123,7 @@ pub async fn find_never_vacuumed(
                 &[&schemas_vec, &tbl, &min_bytes, &max_bytes],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query never-vacuumed tables: {e}"))?
+            .context("Failed to query never-vacuumed tables")?
     } else {
         let query = match order_by {
             None => queries::FIND_NEVER_VACUUMED,
@@ -132,7 +133,7 @@ pub async fn find_never_vacuumed(
         client
             .query(query, &[&schemas_vec, &min_bytes, &max_bytes, &limit])
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query never-vacuumed tables: {e}"))?
+            .context("Failed to query never-vacuumed tables")?
     };
 
     Ok(rows
@@ -167,7 +168,7 @@ pub async fn find_never_analyzed(
                 &[&schemas_vec, &tbl, &min_bytes, &max_bytes],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query never-analyzed tables: {e}"))?
+            .context("Failed to query never-analyzed tables")?
     } else {
         let query = match order_by {
             None => queries::FIND_NEVER_ANALYZED,
@@ -177,7 +178,7 @@ pub async fn find_never_analyzed(
         client
             .query(query, &[&schemas_vec, &min_bytes, &max_bytes, &limit])
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query never-analyzed tables: {e}"))?
+            .context("Failed to query never-analyzed tables")?
     };
 
     Ok(rows
@@ -214,7 +215,7 @@ pub async fn find_wraparound_candidates(
                 &[&schemas_vec, &min_age, &tbl, &min_bytes, &max_bytes],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query wraparound candidates: {e}"))?
+            .context("Failed to query wraparound candidates")?
     } else {
         let query = match order_by {
             None => queries::FIND_WRAPAROUND_CANDIDATES,
@@ -227,7 +228,7 @@ pub async fn find_wraparound_candidates(
                 &[&schemas_vec, &min_age, &min_bytes, &max_bytes, &limit],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query wraparound candidates: {e}"))?
+            .context("Failed to query wraparound candidates")?
     };
 
     Ok(rows
@@ -272,7 +273,7 @@ pub async fn find_bloat_candidates(
                 ],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query bloat candidates: {e}"))?
+            .context("Failed to query bloat candidates")?
     } else {
         let query = match order_by {
             None => queries::FIND_BLOAT_CANDIDATES,
@@ -292,7 +293,7 @@ pub async fn find_bloat_candidates(
                 ],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query bloat candidates: {e}"))?
+            .context("Failed to query bloat candidates")?
     };
 
     Ok(rows
@@ -316,7 +317,7 @@ pub async fn get_freeze_max_age(client: &Client) -> Result<i64> {
     let row = client
         .query_one(queries::GET_FREEZE_MAX_AGE, &[])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to read autovacuum_freeze_max_age: {e}"))?;
+        .context("Failed to read autovacuum_freeze_max_age")?;
     Ok(row.get::<_, i64>(0))
 }
 
@@ -326,7 +327,7 @@ pub async fn get_vacuum_settings(client: &Client) -> Result<(i64, f64)> {
     let row = client
         .query_one(queries::GET_VACUUM_SETTINGS, &[])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to read autovacuum_vacuum settings: {e}"))?;
+        .context("Failed to read autovacuum_vacuum settings")?;
     Ok((
         row.get::<_, i64>("vacuum_threshold"),
         row.get::<_, f64>("vacuum_scale_factor"),
@@ -362,7 +363,7 @@ pub async fn find_needs_vacuum_candidates(
                 ],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query needs-vacuum candidates: {e}"))?
+            .context("Failed to query needs-vacuum candidates")?
     } else {
         let query = match order_by {
             None => queries::FIND_NEEDS_VACUUM,
@@ -382,7 +383,7 @@ pub async fn find_needs_vacuum_candidates(
                 ],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query needs-vacuum candidates: {e}"))?
+            .context("Failed to query needs-vacuum candidates")?
     };
 
     Ok(rows
@@ -421,7 +422,7 @@ pub async fn get_vacuum_max_threshold(client: &Client, server_version_num: i32) 
     let row = client
         .query_one(queries::GET_VACUUM_MAX_THRESHOLD, &[])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to read autovacuum_vacuum_max_threshold: {e}"))?;
+        .context("Failed to read autovacuum_vacuum_max_threshold")?;
     Ok(derive_max_threshold(Some(row.get::<_, i64>(0))))
 }
 
@@ -515,7 +516,7 @@ pub async fn find_vacuum_overdue_candidates(
                 &[&schemas_vec, &tbl, &older_than_days, &min_bytes, &max_bytes],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query vacuum-overdue candidates: {e}"))?
+            .context("Failed to query vacuum-overdue candidates")?
     } else {
         client
             .query(
@@ -529,7 +530,7 @@ pub async fn find_vacuum_overdue_candidates(
                 ],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query vacuum-overdue candidates: {e}"))?
+            .context("Failed to query vacuum-overdue candidates")?
     };
 
     Ok(rows
@@ -564,7 +565,7 @@ pub async fn find_analyze_overdue_candidates(
                 &[&schemas_vec, &tbl, &older_than_days, &min_bytes, &max_bytes],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query analyze-overdue candidates: {e}"))?
+            .context("Failed to query analyze-overdue candidates")?
     } else {
         client
             .query(
@@ -578,7 +579,7 @@ pub async fn find_analyze_overdue_candidates(
                 ],
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to query analyze-overdue candidates: {e}"))?
+            .context("Failed to query analyze-overdue candidates")?
     };
 
     Ok(rows
@@ -626,7 +627,7 @@ async fn terminate_backends(client: &Client, pids: &[i32]) -> Result<()> {
         client
             .execute("SELECT pg_terminate_backend($1)", &[pid])
             .await
-            .map_err(|e| anyhow::anyhow!("pg_terminate_backend({pid}) failed: {e}"))?;
+            .with_context(|| format!("pg_terminate_backend({pid}) failed"))?;
     }
     Ok(())
 }
@@ -650,6 +651,44 @@ fn lock_timeout_skip_message(policy: RunPolicy, schema: &str, table: &str) -> St
         "Skipping \"{schema}\".\"{table}\" — could not acquire lock within {}ms{retries}",
         policy.lock_timeout_ms
     )
+}
+
+/// How a failed table operation should be handled.
+enum OpErrorKind {
+    LockTimeout,
+    ConnectionLost,
+    Other,
+}
+
+/// Classify a table-operation error. A lost connection takes priority.
+fn classify_op_error(e: &tokio_postgres::Error) -> OpErrorKind {
+    if db_error::is_connection_lost_pg(e) {
+        OpErrorKind::ConnectionLost
+    } else if is_lock_timeout(e) {
+        OpErrorKind::LockTimeout
+    } else {
+        OpErrorKind::Other
+    }
+}
+
+/// Log the lost connection once and build the error that aborts the run.
+fn connection_lost_error(
+    logger: &Logger,
+    operation: &str,
+    schema: &str,
+    table: &str,
+    position: Option<(usize, usize)>,
+    cause: &str,
+) -> anyhow::Error {
+    let lost = ConnectionLost {
+        operation: operation.to_string(),
+        schema: schema.to_string(),
+        table: table.to_string(),
+        position,
+        cause: cause.to_string(),
+    };
+    logger.log_always(LogLevel::Error, &lost.to_string());
+    anyhow::Error::new(lost)
 }
 
 /// Retry `op` when it fails on lock_timeout, up to `policy.lock_timeout_retries`
@@ -1013,6 +1052,16 @@ pub async fn run_vacuum_never_vacuumed(
     );
 
     for (i, t) in tables.iter().enumerate() {
+        if client.is_closed() {
+            return Err(connection_lost_error(
+                logger,
+                OP_VACUUM,
+                &t.schema_name,
+                &t.table_name,
+                Some((i + 1, tables.len())),
+                "connection closed",
+            ));
+        }
         // Check if shutdown was requested
         if *shutdown_rx.borrow() {
             logger.log(
@@ -1121,6 +1170,16 @@ pub async fn run_vacuum_never_vacuumed(
                 summary.succeeded += 1;
             }
             Err(e) => {
+                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
+                    return Err(connection_lost_error(
+                        logger,
+                        OP_VACUUM,
+                        &t.schema_name,
+                        &t.table_name,
+                        Some((i + 1, tables.len())),
+                        &e.to_string(),
+                    ));
+                }
                 let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(
@@ -1189,6 +1248,16 @@ pub async fn run_analyze_never_analyzed(
     );
 
     for (i, t) in tables.iter().enumerate() {
+        if client.is_closed() {
+            return Err(connection_lost_error(
+                logger,
+                OP_ANALYZE,
+                &t.schema_name,
+                &t.table_name,
+                Some((i + 1, tables.len())),
+                "connection closed",
+            ));
+        }
         // Check if shutdown was requested
         if *shutdown_rx.borrow() {
             logger.log(
@@ -1288,6 +1357,16 @@ pub async fn run_analyze_never_analyzed(
                 summary.succeeded += 1;
             }
             Err(e) => {
+                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
+                    return Err(connection_lost_error(
+                        logger,
+                        OP_ANALYZE,
+                        &t.schema_name,
+                        &t.table_name,
+                        Some((i + 1, tables.len())),
+                        &e.to_string(),
+                    ));
+                }
                 let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(
@@ -1399,6 +1478,16 @@ pub async fn run_freeze_wraparound(
     }
 
     for (i, t) in tables.iter().enumerate() {
+        if client.is_closed() {
+            return Err(connection_lost_error(
+                logger,
+                OP_FREEZE,
+                &t.schema_name,
+                &t.table_name,
+                Some((i + 1, tables.len())),
+                "connection closed",
+            ));
+        }
         // Check if shutdown was requested
         if *shutdown_rx.borrow() {
             logger.log(
@@ -1497,6 +1586,16 @@ pub async fn run_freeze_wraparound(
                 summary.succeeded += 1;
             }
             Err(e) => {
+                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
+                    return Err(connection_lost_error(
+                        logger,
+                        OP_FREEZE,
+                        &t.schema_name,
+                        &t.table_name,
+                        Some((i + 1, tables.len())),
+                        &e.to_string(),
+                    ));
+                }
                 let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(
@@ -1571,6 +1670,16 @@ pub async fn run_bloat_vacuum(
     );
 
     for (i, t) in tables.iter().enumerate() {
+        if client.is_closed() {
+            return Err(connection_lost_error(
+                logger,
+                OP_BLOAT,
+                &t.schema_name,
+                &t.table_name,
+                Some((i + 1, tables.len())),
+                "connection closed",
+            ));
+        }
         // Check if shutdown was requested
         if *shutdown_rx.borrow() {
             logger.log(
@@ -1693,6 +1802,16 @@ pub async fn run_bloat_vacuum(
                 summary.succeeded += 1;
             }
             Err(e) => {
+                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
+                    return Err(connection_lost_error(
+                        logger,
+                        OP_BLOAT,
+                        &t.schema_name,
+                        &t.table_name,
+                        Some((i + 1, tables.len())),
+                        &e.to_string(),
+                    ));
+                }
                 let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(
@@ -1763,6 +1882,16 @@ pub async fn run_needs_vacuum(
     );
 
     for (i, t) in tables.iter().enumerate() {
+        if client.is_closed() {
+            return Err(connection_lost_error(
+                logger,
+                OP_NEEDS_VACUUM,
+                &t.schema_name,
+                &t.table_name,
+                Some((i + 1, tables.len())),
+                "connection closed",
+            ));
+        }
         // Check if shutdown was requested
         if *shutdown_rx.borrow() {
             logger.log(
@@ -1903,6 +2032,16 @@ pub async fn run_needs_vacuum(
                 summary.succeeded += 1;
             }
             Err(e) => {
+                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
+                    return Err(connection_lost_error(
+                        logger,
+                        OP_NEEDS_VACUUM,
+                        &t.schema_name,
+                        &t.table_name,
+                        Some((i + 1, tables.len())),
+                        &e.to_string(),
+                    ));
+                }
                 let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(
@@ -1971,6 +2110,16 @@ pub async fn run_vacuum_overdue(
     );
 
     for (i, t) in tables.iter().enumerate() {
+        if client.is_closed() {
+            return Err(connection_lost_error(
+                logger,
+                OP_VACUUM_OVERDUE,
+                &t.schema_name,
+                &t.table_name,
+                Some((i + 1, tables.len())),
+                "connection closed",
+            ));
+        }
         if *shutdown_rx.borrow() {
             logger.log(
                 LogLevel::Warning,
@@ -2082,6 +2231,16 @@ pub async fn run_vacuum_overdue(
                 summary.succeeded += 1;
             }
             Err(e) => {
+                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
+                    return Err(connection_lost_error(
+                        logger,
+                        OP_VACUUM_OVERDUE,
+                        &t.schema_name,
+                        &t.table_name,
+                        Some((i + 1, tables.len())),
+                        &e.to_string(),
+                    ));
+                }
                 let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(
@@ -2149,6 +2308,16 @@ pub async fn run_analyze_overdue(
     );
 
     for (i, t) in tables.iter().enumerate() {
+        if client.is_closed() {
+            return Err(connection_lost_error(
+                logger,
+                OP_ANALYZE_OVERDUE,
+                &t.schema_name,
+                &t.table_name,
+                Some((i + 1, tables.len())),
+                "connection closed",
+            ));
+        }
         if *shutdown_rx.borrow() {
             logger.log(
                 LogLevel::Warning,
@@ -2260,6 +2429,16 @@ pub async fn run_analyze_overdue(
                 summary.succeeded += 1;
             }
             Err(e) => {
+                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
+                    return Err(connection_lost_error(
+                        logger,
+                        OP_ANALYZE_OVERDUE,
+                        &t.schema_name,
+                        &t.table_name,
+                        Some((i + 1, tables.len())),
+                        &e.to_string(),
+                    ));
+                }
                 let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(
@@ -2306,7 +2485,7 @@ pub async fn discover_all_user_schemas(client: &Client) -> Result<Vec<String>> {
     let rows = client
         .query(queries::GET_ALL_USER_SCHEMAS, &[])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to discover schemas: {e}"))?;
+        .context("Failed to discover schemas")?;
 
     Ok(rows
         .into_iter()
@@ -2325,7 +2504,7 @@ pub async fn observe_replica_lag(client: &Client) -> Result<LagObservation> {
     let can_read: bool = client
         .query_one(queries::GET_CAN_READ_REPLICATION_STATS, &[])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to check replication-stats privileges: {e}"))?
+        .context("Failed to check replication-stats privileges")?
         .get("can_read");
 
     if !can_read {
@@ -2335,7 +2514,7 @@ pub async fn observe_replica_lag(client: &Client) -> Result<LagObservation> {
     let rows = client
         .query(queries::GET_REPLICATION_LAG, &[])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to read pg_stat_replication: {e}"))?;
+        .context("Failed to read pg_stat_replication")?;
 
     if rows.is_empty() {
         return Ok(LagObservation::NoReplicas);
@@ -2576,7 +2755,7 @@ pub async fn observe_xmin_horizon(client: &Client) -> Result<HorizonObservation>
     let can_read: bool = client
         .query_one(queries::GET_CAN_READ_ACTIVITY_XMIN, &[])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to check activity/xmin privileges: {e}"))?
+        .context("Failed to check activity/xmin privileges")?
         .get("can_read");
 
     if !can_read {
@@ -2586,7 +2765,7 @@ pub async fn observe_xmin_horizon(client: &Client) -> Result<HorizonObservation>
     let rows = client
         .query(queries::FIND_XMIN_HORIZON_BLOCKERS, &[])
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to read xmin horizon blockers: {e}"))?;
+        .context("Failed to read xmin horizon blockers")?;
 
     Ok(HorizonObservation::Observed(
         rows.into_iter()
@@ -2810,7 +2989,7 @@ pub async fn resolve_explicit_tables(
             &[&schema_names, &table_names],
         )
         .await
-        .map_err(|e| anyhow::anyhow!("Failed to resolve --also-tables entries: {e}"))?;
+        .context("Failed to resolve --also-tables entries")?;
 
     let existing: std::collections::HashSet<(String, String)> = rows
         .into_iter()
@@ -2911,6 +3090,16 @@ pub async fn run_also_tables(
     );
 
     for (i, t) in tables.iter().enumerate() {
+        if client.is_closed() {
+            return Err(connection_lost_error(
+                logger,
+                OP_VACUUM_ANALYZE,
+                &t.schema_name,
+                &t.table_name,
+                Some((i + 1, tables.len())),
+                "connection closed",
+            ));
+        }
         if *shutdown_rx.borrow() {
             logger.log(
                 LogLevel::Warning,
@@ -3056,6 +3245,16 @@ pub async fn run_also_tables(
                 summary.succeeded += 1;
             }
             Err(e) => {
+                if matches!(classify_op_error(&e), OpErrorKind::ConnectionLost) {
+                    return Err(connection_lost_error(
+                        logger,
+                        OP_VACUUM_ANALYZE,
+                        &t.schema_name,
+                        &t.table_name,
+                        Some((i + 1, tables.len())),
+                        &e.to_string(),
+                    ));
+                }
                 let duration_ms = start.elapsed().as_millis() as i64;
                 if is_lock_timeout(&e) {
                     logger.log(

@@ -757,7 +757,23 @@ fn apply_dsn(mut args: Args) -> Result<(Args, DsnOutcome)> {
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
+    match run().await {
+        Ok(code) => std::process::ExitCode::from(code),
+        Err(e) => {
+            // A lost connection has already been logged once with full context.
+            if !e
+                .chain()
+                .any(|c| c.is::<pg_maintainer::db_error::ConnectionLost>())
+            {
+                eprintln!("Error: {e:?}");
+            }
+            std::process::ExitCode::from(pg_maintainer::db_error::exit_code_for(&e))
+        }
+    }
+}
+
+async fn run() -> Result<u8> {
     let mut args = Args::parse();
 
     if args.password.is_some() {
@@ -1573,10 +1589,9 @@ async fn main() -> Result<()> {
                         LogLevel::Warning,
                         &format!(
                             "Could not read autovacuum_vacuum settings from server, \
-                             falling back to defaults ({}, {}): {}",
+                             falling back to defaults ({}, {}): {e:#}",
                             pg_maintainer::config::DEFAULT_VACUUM_THRESHOLD,
                             pg_maintainer::config::DEFAULT_VACUUM_SCALE_FACTOR,
-                            e
                         ),
                     );
                     (
@@ -1639,7 +1654,7 @@ async fn main() -> Result<()> {
                     ));
                     logger.log(
                         LogLevel::Warning,
-                        &format!("{e}; falling back to a max threshold of {fallback:.0}"),
+                        &format!("{e:#}; falling back to a max threshold of {fallback:.0}"),
                     );
                     fallback
                 }
@@ -1678,7 +1693,9 @@ async fn main() -> Result<()> {
             Err(e) => {
                 logger.log(
                     LogLevel::Warning,
-                    &format!("Max-threshold discovery failed, using classic candidates only: {e}"),
+                    &format!(
+                        "Max-threshold discovery failed, using classic candidates only: {e:#}"
+                    ),
                 );
                 Vec::new()
             }
@@ -1993,7 +2010,7 @@ async fn main() -> Result<()> {
             LogLevel::Warning,
             "pg-maintainer was terminated by signal — exiting with code 130",
         );
-        std::process::exit(130);
+        return Ok(130);
     }
 
     if total_fail > 0 {
@@ -2002,5 +2019,5 @@ async fn main() -> Result<()> {
         ));
     }
 
-    Ok(())
+    Ok(0)
 }

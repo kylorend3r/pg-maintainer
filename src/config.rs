@@ -8,6 +8,12 @@ pub const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 // Upper bound PostgreSQL accepts for VACUUM (PARALLEL n).
 pub const MAX_VACUUM_PARALLEL: u32 = 1024;
 
+// TCP keepalives, so a silently dead peer (e.g. a firewall dropping packets
+// without an RST) is detected instead of hanging until the OS gives up.
+pub const TCP_KEEPALIVE_IDLE_SECONDS: u64 = 30;
+pub const TCP_KEEPALIVE_INTERVAL_SECONDS: u64 = 10;
+pub const TCP_KEEPALIVE_RETRIES: u32 = 3;
+
 // Maintenance work memory
 pub const DEFAULT_MAINTENANCE_WORK_MEM_GB: u64 = 1;
 pub const MAX_MAINTENANCE_WORK_MEM_GB: u64 = 32;

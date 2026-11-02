@@ -3,6 +3,7 @@ use crate::types::SslMode;
 use anyhow::{Context, Result};
 use native_tls::{Certificate, Identity, TlsConnector};
 use postgres_native_tls::MakeTlsConnector;
+use std::time::Duration;
 use std::{env, fs};
 use tokio_postgres::{Config, NoTls, config::SslMode as TokioSslMode};
 use zeroize::Zeroizing;
@@ -240,6 +241,19 @@ pub async fn connect(
     Ok(client)
 }
 
+/// Enable TCP keepalives so a dead peer is noticed within roughly
+/// idle + interval * retries seconds.
+fn apply_keepalives(cfg: &mut Config) {
+    cfg.keepalives(true)
+        .keepalives_idle(Duration::from_secs(
+            crate::config::TCP_KEEPALIVE_IDLE_SECONDS,
+        ))
+        .keepalives_interval(Duration::from_secs(
+            crate::config::TCP_KEEPALIVE_INTERVAL_SECONDS,
+        ))
+        .keepalives_retries(crate::config::TCP_KEEPALIVE_RETRIES);
+}
+
 /// Open a raw connection (no session parameters set).
 pub async fn connect_raw(
     connection_string: &str,
@@ -248,8 +262,14 @@ pub async fn connect_raw(
     ssl_client_cert: Option<String>,
     ssl_client_key: Option<String>,
 ) -> Result<tokio_postgres::Client> {
+    let mut cfg: Config = connection_string
+        .parse()
+        .context("Failed to parse connection string")?;
+    apply_keepalives(&mut cfg);
+
     if *sslmode == SslMode::Disable {
-        let (client, conn) = tokio_postgres::connect(connection_string, NoTls)
+        let (client, conn) = cfg
+            .connect(NoTls)
             .await
             .context("Failed to connect to PostgreSQL")?;
         tokio::spawn(async move {
@@ -261,9 +281,6 @@ pub async fn connect_raw(
     }
 
     // SSL path
-    let mut cfg: Config = connection_string
-        .parse()
-        .context("Failed to parse connection string")?;
     cfg.ssl_mode(TokioSslMode::Require);
 
     let mut tls_builder = TlsConnector::builder();
