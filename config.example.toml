@@ -63,8 +63,13 @@ maintenance-work-mem-gb = 1   # max: 32
 # vacuum-cost-delay-ms = 10     # 0-100; 0 explicitly disables throttling
 # vacuum-cost-limit    = 200    # 1-10000; cost budget spent between delays
 
-# ── Lock-timeout retry ────────────────────────────────────────────────────────
-# A table that can't acquire its lock within lock_timeout (10ms) is skipped by
+# ── Lock timeout and retry ────────────────────────────────────────────────────
+# Session lock_timeout, in milliseconds. VACUUM/ANALYZE take SHARE UPDATE
+# EXCLUSIVE; a longer timeout lets the tool queue behind conflicting locks, and
+# later conflicting requests (e.g. DDL) queue behind it. Raise gradually.
+# lock-timeout-ms = 10          # 1-60000 (default 10); 0 is rejected (= wait forever)
+#
+# A table that can't acquire its lock within lock_timeout is skipped by
 # default. Set lock-timeout-retries above 0 to retry it instead, waiting
 # lock-timeout-retry-delay-ms before the first retry and doubling the delay
 # after each subsequent one.

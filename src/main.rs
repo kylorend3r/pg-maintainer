@@ -222,9 +222,20 @@ struct Args {
     )]
     gentle: bool,
 
-    // ── Lock-timeout retry ───────────────────────────────────────────────────
+    // ── Lock timeout and retry ───────────────────────────────────────────────
+    /// Session lock_timeout in milliseconds. A table whose lock can't be acquired
+    /// within it is skipped (or retried, see --lock-timeout-retries). 0 is rejected
+    /// because PostgreSQL treats it as "wait forever".
+    #[arg(
+        long,
+        value_name = "MS",
+        default_value_t = pg_maintainer::config::DEFAULT_LOCK_TIMEOUT_MS,
+        help = "Session lock_timeout in milliseconds, 1-60000 (default: 10)"
+    )]
+    lock_timeout_ms: u64,
+
     /// Retry a table's VACUUM/ANALYZE up to N times if it can't acquire its lock
-    /// within lock_timeout (10ms), instead of skipping it immediately. 0 (default)
+    /// within lock_timeout, instead of skipping it immediately. 0 (default)
     /// keeps the original fail-fast behavior.
     #[arg(
         long,
@@ -402,6 +413,7 @@ struct Config {
     vacuum_cost_delay_ms: Option<f64>,
     vacuum_cost_limit: Option<i32>,
     gentle: Option<bool>,
+    lock_timeout_ms: Option<u64>,
     lock_timeout_retries: Option<u32>,
     lock_timeout_retry_delay_ms: Option<u64>,
     max_replica_lag_seconds: Option<f64>,
@@ -549,6 +561,11 @@ fn merge_config(file: Config, mut args: Args) -> Args {
         args.gentle = file.gentle.unwrap_or(false);
     }
 
+    if args.lock_timeout_ms == pg_maintainer::config::DEFAULT_LOCK_TIMEOUT_MS
+        && let Some(v) = file.lock_timeout_ms
+    {
+        args.lock_timeout_ms = v;
+    }
     if args.lock_timeout_retries == pg_maintainer::config::DEFAULT_LOCK_TIMEOUT_RETRIES
         && let Some(v) = file.lock_timeout_retries
     {
@@ -903,7 +920,14 @@ async fn main() -> Result<()> {
         ));
     }
 
-    // Validate lock_timeout retry settings
+    // Validate lock_timeout settings
+    if !(1..=pg_maintainer::config::MAX_LOCK_TIMEOUT_MS).contains(&args.lock_timeout_ms) {
+        return Err(anyhow::anyhow!(
+            "--lock-timeout-ms ({}) must be between 1 and {}",
+            args.lock_timeout_ms,
+            pg_maintainer::config::MAX_LOCK_TIMEOUT_MS
+        ));
+    }
     if args.lock_timeout_retries > pg_maintainer::config::MAX_LOCK_TIMEOUT_RETRIES {
         return Err(anyhow::anyhow!(
             "--lock-timeout-retries ({}) must be <= {}",
@@ -1215,10 +1239,16 @@ async fn main() -> Result<()> {
     }
 
     // Set lock_timeout so VACUUM/ANALYZE fail fast instead of blocking indefinitely.
-    connection::set_lock_timeout(&client)
+    connection::set_lock_timeout(&client, args.lock_timeout_ms)
         .await
         .context("Failed to set lock_timeout")?;
-    logger.log(LogLevel::Info, "lock_timeout set to 10ms for this session");
+    logger.log(
+        LogLevel::Info,
+        &format!(
+            "lock_timeout set to {}ms for this session",
+            args.lock_timeout_ms
+        ),
+    );
 
     // Resolve --limit (default to no limit if not specified)
     let limit_n = args.limit.unwrap_or(i64::MAX);
@@ -1291,6 +1321,7 @@ async fn main() -> Result<()> {
         force: args.force,
         skip_active_vacuum: args.skip_active_vacuum,
         check_xmin_horizon: !args.skip_xmin_horizon_check,
+        lock_timeout_ms: args.lock_timeout_ms,
         lock_timeout_retries: args.lock_timeout_retries,
         lock_timeout_retry_delay_ms: args.lock_timeout_retry_delay_ms,
     };

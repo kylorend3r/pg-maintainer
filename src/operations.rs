@@ -639,6 +639,19 @@ fn is_lock_timeout(err: &tokio_postgres::Error) -> bool {
     err.code() == Some(&SqlState::LOCK_NOT_AVAILABLE)
 }
 
+/// Skip message for a table whose lock could not be acquired within lock_timeout.
+fn lock_timeout_skip_message(policy: RunPolicy, schema: &str, table: &str) -> String {
+    let retries = if policy.lock_timeout_retries > 0 {
+        format!(" after {} retries", policy.lock_timeout_retries)
+    } else {
+        String::new()
+    };
+    format!(
+        "Skipping \"{schema}\".\"{table}\" — could not acquire lock within {}ms{retries}",
+        policy.lock_timeout_ms
+    )
+}
+
 /// Retry `op` when it fails on lock_timeout, up to `policy.lock_timeout_retries`
 /// times, waiting `policy.lock_timeout_retry_delay_ms` before the first retry and
 /// doubling the delay after each subsequent one. With the default of 0 retries,
@@ -1073,10 +1086,7 @@ pub async fn run_vacuum_never_vacuumed(
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
-                        &format!(
-                            "Skipping \"{}\".\"{}\" — could not acquire lock within 10ms",
-                            t.schema_name, t.table_name
-                        ),
+                        &lock_timeout_skip_message(policy, &t.schema_name, &t.table_name),
                     );
                     summary.skipped += 1;
                 } else {
@@ -1243,10 +1253,7 @@ pub async fn run_analyze_never_analyzed(
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
-                        &format!(
-                            "Skipping \"{}\".\"{}\" — could not acquire lock within 10ms",
-                            t.schema_name, t.table_name
-                        ),
+                        &lock_timeout_skip_message(policy, &t.schema_name, &t.table_name),
                     );
                     summary.skipped += 1;
                 } else {
@@ -1455,10 +1462,7 @@ pub async fn run_freeze_wraparound(
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
-                        &format!(
-                            "Skipping \"{}\".\"{}\" — could not acquire lock within 10ms",
-                            t.schema_name, t.table_name
-                        ),
+                        &lock_timeout_skip_message(policy, &t.schema_name, &t.table_name),
                     );
                     summary.skipped += 1;
                 } else {
@@ -1654,10 +1658,7 @@ pub async fn run_bloat_vacuum(
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
-                        &format!(
-                            "Skipping \"{}\".\"{}\" — could not acquire lock within 10ms",
-                            t.schema_name, t.table_name
-                        ),
+                        &lock_timeout_skip_message(policy, &t.schema_name, &t.table_name),
                     );
                     summary.skipped += 1;
                 } else {
@@ -1867,10 +1868,7 @@ pub async fn run_needs_vacuum(
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
-                        &format!(
-                            "Skipping \"{}\".\"{}\" — could not acquire lock within 10ms",
-                            t.schema_name, t.table_name
-                        ),
+                        &lock_timeout_skip_message(policy, &t.schema_name, &t.table_name),
                     );
                     summary.skipped += 1;
                 } else {
@@ -2049,10 +2047,7 @@ pub async fn run_vacuum_overdue(
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
-                        &format!(
-                            "Skipping \"{}\".\"{}\" — could not acquire lock within 10ms",
-                            t.schema_name, t.table_name
-                        ),
+                        &lock_timeout_skip_message(policy, &t.schema_name, &t.table_name),
                     );
                     summary.skipped += 1;
                 } else {
@@ -2230,10 +2225,7 @@ pub async fn run_analyze_overdue(
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
-                        &format!(
-                            "Skipping \"{}\".\"{}\" — could not acquire lock within 10ms",
-                            t.schema_name, t.table_name
-                        ),
+                        &lock_timeout_skip_message(policy, &t.schema_name, &t.table_name),
                     );
                     summary.skipped += 1;
                 } else {
@@ -3049,10 +3041,7 @@ pub async fn run_also_tables(
                 if is_lock_timeout(&e) {
                     logger.log(
                         LogLevel::Warning,
-                        &format!(
-                            "Skipping \"{}\".\"{}\" — could not acquire lock within 10ms",
-                            t.schema_name, t.table_name
-                        ),
+                        &lock_timeout_skip_message(policy, &t.schema_name, &t.table_name),
                     );
                     summary.skipped += 1;
                 } else {
@@ -3085,4 +3074,37 @@ pub async fn run_also_tables(
     }
 
     Ok(summary)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policy(lock_timeout_ms: u64, lock_timeout_retries: u32) -> RunPolicy {
+        RunPolicy {
+            dry_run: false,
+            force: false,
+            skip_active_vacuum: false,
+            check_xmin_horizon: false,
+            lock_timeout_ms,
+            lock_timeout_retries,
+            lock_timeout_retry_delay_ms: 50,
+        }
+    }
+
+    #[test]
+    fn test_lock_timeout_skip_message_uses_configured_value() {
+        assert_eq!(
+            lock_timeout_skip_message(policy(2000, 0), "public", "big"),
+            "Skipping \"public\".\"big\" — could not acquire lock within 2000ms"
+        );
+    }
+
+    #[test]
+    fn test_lock_timeout_skip_message_mentions_retries() {
+        assert_eq!(
+            lock_timeout_skip_message(policy(10, 3), "public", "big"),
+            "Skipping \"public\".\"big\" — could not acquire lock within 10ms after 3 retries"
+        );
+    }
 }

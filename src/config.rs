@@ -71,3 +71,8 @@ pub const DEFAULT_LOCK_TIMEOUT_RETRIES: u32 = 0;
 pub const MAX_LOCK_TIMEOUT_RETRIES: u32 = 20;
 pub const DEFAULT_LOCK_TIMEOUT_RETRY_DELAY_MS: u64 = 50;
 pub const MAX_LOCK_TIMEOUT_RETRY_DELAY_MS: u64 = 60_000;
+
+// Session lock_timeout. The default preserves the original fail-fast 10ms. 0 is
+// rejected on purpose: PostgreSQL treats it as "wait forever".
+pub const DEFAULT_LOCK_TIMEOUT_MS: u64 = 10;
+pub const MAX_LOCK_TIMEOUT_MS: u64 = 60_000;

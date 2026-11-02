@@ -1380,6 +1380,119 @@ lock-timeout-retries = 50
         .stderr(predicate::str::contains("--lock-timeout-retries"));
 }
 
+// ── Lock timeout (--lock-timeout-ms) ────────────────────────────────────────
+
+#[test]
+fn test_lock_timeout_ms_default_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_lock_timeout_ms_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--lock-timeout-ms")
+        .arg("250")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+}
+
+#[test]
+fn test_lock_timeout_ms_zero_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
+        .arg("--lock-timeout-ms")
+        .arg("0")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--lock-timeout-ms"))
+        .stderr(predicate::str::contains("must be between 1 and 60000"));
+}
+
+#[test]
+fn test_lock_timeout_ms_above_max_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
+        .arg("--lock-timeout-ms")
+        .arg("60001")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--lock-timeout-ms"))
+        .stderr(predicate::str::contains("must be between 1 and 60000"));
+}
+
+#[test]
+fn test_lock_timeout_ms_not_a_number_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--lock-timeout-ms")
+        .arg("soon")
+        .env_clear()
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn test_config_file_with_lock_timeout_ms_key() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+mode = ["never-vacuumed"]
+lock-timeout-ms = 250
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2))
+        .stderr(predicate::str::contains("--lock-timeout-ms").not());
+}
+
+#[test]
+fn test_config_file_with_invalid_lock_timeout_ms_rejected() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+mode = ["never-vacuumed"]
+lock-timeout-ms = 0
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--lock-timeout-ms"));
+}
+
 // ── Connection string (--dsn / PG_DSN) ─────────────────────────────────────────
 
 #[test]
