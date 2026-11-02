@@ -103,7 +103,7 @@ silence-mode = false     # suppress terminal output; logs still written to file
 # ── Vacuum-horizon check ───────────────────────────────────────────────────────
 # Pre-flight diagnostic that identifies what (if anything) is holding back the
 # xmin horizon: open transactions, replication slots, or prepared transactions.
-# Enriches VACUUM's "0 dead tuples removed" warnings with the actual blocker.
+# Enriches VACUUM's "estimated dead tuples did not decrease" warnings with the actual blocker.
 # skip-xmin-horizon-check = false            # set true to disable the check
 # xmin-horizon-warn-age = 1000000            # emit WARNING if blockers exceed this XID age
 

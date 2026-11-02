@@ -17,7 +17,7 @@ use tokio_postgres::error::SqlState;
 /// Result of a table maintenance operation.
 struct OperationResult {
     dead_tuples_before: Option<i64>,
-    dead_tuples_removed: Option<i64>,
+    dead_tuples_reduced_approx: Option<i64>,
 }
 
 /// Log entry details for a maintenance operation.
@@ -28,7 +28,7 @@ struct LogEntry<'a> {
     mode: &'a str,
     status: &'a str,
     dead_tuples_before: Option<i64>,
-    dead_tuples_removed: Option<i64>,
+    dead_tuples_reduced_approx: Option<i64>,
     duration_ms: i64,
     error_message: Option<&'a str>,
 }
@@ -86,7 +86,7 @@ async fn log_maintenance_operation(client: &Client, dry_run: bool, entry: LogEnt
         &entry.mode,
         &entry.status,
         &entry.dead_tuples_before,
-        &entry.dead_tuples_removed,
+        &entry.dead_tuples_reduced_approx,
         &entry.duration_ms,
         &entry.error_message,
     ];
@@ -735,14 +735,14 @@ async fn vacuum_table(
         .await?
         .get(0);
 
-    let removed = vacuum_output::get_dead_tuples_removed(dead_before, dead_after);
+    let reduced = vacuum_output::estimate_dead_tuples_reduced(dead_before, dead_after);
     Ok(OperationResult {
         dead_tuples_before: if dead_before > 0 {
             Some(dead_before)
         } else {
             None
         },
-        dead_tuples_removed: removed,
+        dead_tuples_reduced_approx: reduced,
     })
 }
 
@@ -759,7 +759,7 @@ async fn analyze_table(
     client.execute(&sql, &[]).await?;
     Ok(OperationResult {
         dead_tuples_before: None,
-        dead_tuples_removed: None,
+        dead_tuples_reduced_approx: None,
     })
 }
 
@@ -794,7 +794,7 @@ async fn freeze_table(
     client.execute(&sql, &[]).await?;
     Ok(OperationResult {
         dead_tuples_before: None,
-        dead_tuples_removed: None,
+        dead_tuples_reduced_approx: None,
     })
 }
 
@@ -1036,22 +1036,19 @@ pub async fn run_vacuum_never_vacuumed(
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_VACUUM, start.elapsed());
-                if let Some(0) = result.dead_tuples_removed {
-                    logger.log(
-                        LogLevel::Warning,
-                        &format!(
-                            "VACUUM on \"{}\".\"{}\" removed 0 dead tuples — table may not have needed vacuuming, or another process already cleaned it up",
-                            t.schema_name, t.table_name
-                        ),
+                if let Some(n) = result.dead_tuples_reduced_approx {
+                    let msg = vacuum_output::format_dead_tuple_change(
+                        "VACUUM",
+                        &t.schema_name,
+                        &t.table_name,
+                        n,
                     );
-                } else if let Some(n) = result.dead_tuples_removed {
-                    logger.log(
-                        LogLevel::Info,
-                        &format!(
-                            "VACUUM on \"{}\".\"{}\" removed {n} dead tuple(s)",
-                            t.schema_name, t.table_name
-                        ),
-                    );
+                    let level = if n == 0 {
+                        LogLevel::Warning
+                    } else {
+                        LogLevel::Info
+                    };
+                    logger.log(level, &msg);
                 }
                 log_maintenance_operation(
                     client,
@@ -1063,7 +1060,7 @@ pub async fn run_vacuum_never_vacuumed(
                         mode: "never-vacuumed",
                         status: "success",
                         dead_tuples_before: result.dead_tuples_before,
-                        dead_tuples_removed: result.dead_tuples_removed,
+                        dead_tuples_reduced_approx: result.dead_tuples_reduced_approx,
                         duration_ms,
                         error_message: None,
                     },
@@ -1099,7 +1096,7 @@ pub async fn run_vacuum_never_vacuumed(
                             mode: "never-vacuumed",
                             status: "error",
                             dead_tuples_before: None,
-                            dead_tuples_removed: None,
+                            dead_tuples_reduced_approx: None,
                             duration_ms,
                             error_message: Some(&e.to_string()),
                         },
@@ -1233,7 +1230,7 @@ pub async fn run_analyze_never_analyzed(
                         mode: "never-analyzed",
                         status: "success",
                         dead_tuples_before: result.dead_tuples_before,
-                        dead_tuples_removed: result.dead_tuples_removed,
+                        dead_tuples_reduced_approx: result.dead_tuples_reduced_approx,
                         duration_ms,
                         error_message: None,
                     },
@@ -1269,7 +1266,7 @@ pub async fn run_analyze_never_analyzed(
                             mode: "never-analyzed",
                             status: "error",
                             dead_tuples_before: None,
-                            dead_tuples_removed: None,
+                            dead_tuples_reduced_approx: None,
                             duration_ms,
                             error_message: Some(&e.to_string()),
                         },
@@ -1445,7 +1442,7 @@ pub async fn run_freeze_wraparound(
                         mode: "prevent-wraparound",
                         status: "success",
                         dead_tuples_before: result.dead_tuples_before,
-                        dead_tuples_removed: result.dead_tuples_removed,
+                        dead_tuples_reduced_approx: result.dead_tuples_reduced_approx,
                         duration_ms,
                         error_message: None,
                     },
@@ -1481,7 +1478,7 @@ pub async fn run_freeze_wraparound(
                             mode: "prevent-wraparound",
                             status: "error",
                             dead_tuples_before: None,
-                            dead_tuples_removed: None,
+                            dead_tuples_reduced_approx: None,
                             duration_ms,
                             error_message: Some(&e.to_string()),
                         },
@@ -1615,29 +1612,24 @@ pub async fn run_bloat_vacuum(
             Ok(result) => {
                 let duration_ms = start.elapsed().as_millis() as i64;
                 logger.log_table_success(&t.schema_name, &t.table_name, OP_BLOAT, start.elapsed());
-                if let Some(0) = result.dead_tuples_removed {
-                    let mut msg = format!(
-                        "VACUUM on \"{}\".\"{}\" removed 0 dead tuples",
-                        t.schema_name, t.table_name
+                if let Some(n) = result.dead_tuples_reduced_approx {
+                    let mut msg = vacuum_output::format_dead_tuple_change(
+                        "VACUUM",
+                        &t.schema_name,
+                        &t.table_name,
+                        n,
                     );
-                    if policy.check_xmin_horizon {
-                        if let Ok(Some(blocker_desc)) = describe_worst_xmin_blocker(client).await {
+                    if n == 0 {
+                        if policy.check_xmin_horizon
+                            && let Ok(Some(blocker_desc)) =
+                                describe_worst_xmin_blocker(client).await
+                        {
                             msg.push_str(&format!(" — blocked by: {}", blocker_desc));
-                        } else {
-                            msg.push_str(" — table may not have needed vacuuming, or another process already cleaned it up");
                         }
+                        logger.log(LogLevel::Warning, &msg);
                     } else {
-                        msg.push_str(" — table may not have needed vacuuming, or another process already cleaned it up");
+                        logger.log(LogLevel::Info, &msg);
                     }
-                    logger.log(LogLevel::Warning, &msg);
-                } else if let Some(n) = result.dead_tuples_removed {
-                    logger.log(
-                        LogLevel::Info,
-                        &format!(
-                            "VACUUM on \"{}\".\"{}\" removed {n} dead tuple(s)",
-                            t.schema_name, t.table_name
-                        ),
-                    );
                 }
                 log_maintenance_operation(
                     client,
@@ -1649,7 +1641,7 @@ pub async fn run_bloat_vacuum(
                         mode: "prevent-bloat",
                         status: "success",
                         dead_tuples_before: result.dead_tuples_before,
-                        dead_tuples_removed: result.dead_tuples_removed,
+                        dead_tuples_reduced_approx: result.dead_tuples_reduced_approx,
                         duration_ms,
                         error_message: None,
                     },
@@ -1685,7 +1677,7 @@ pub async fn run_bloat_vacuum(
                             mode: "prevent-bloat",
                             status: "error",
                             dead_tuples_before: None,
-                            dead_tuples_removed: None,
+                            dead_tuples_reduced_approx: None,
                             duration_ms,
                             error_message: Some(&e.to_string()),
                         },
@@ -1833,29 +1825,24 @@ pub async fn run_needs_vacuum(
                     OP_NEEDS_VACUUM,
                     start.elapsed(),
                 );
-                if let Some(0) = result.dead_tuples_removed {
-                    let mut msg = format!(
-                        "VACUUM on \"{}\".\"{}\" removed 0 dead tuples",
-                        t.schema_name, t.table_name
+                if let Some(n) = result.dead_tuples_reduced_approx {
+                    let mut msg = vacuum_output::format_dead_tuple_change(
+                        "VACUUM",
+                        &t.schema_name,
+                        &t.table_name,
+                        n,
                     );
-                    if policy.check_xmin_horizon {
-                        if let Ok(Some(blocker_desc)) = describe_worst_xmin_blocker(client).await {
+                    if n == 0 {
+                        if policy.check_xmin_horizon
+                            && let Ok(Some(blocker_desc)) =
+                                describe_worst_xmin_blocker(client).await
+                        {
                             msg.push_str(&format!(" — blocked by: {}", blocker_desc));
-                        } else {
-                            msg.push_str(" — table may not have needed vacuuming, or another process already cleaned it up");
                         }
+                        logger.log(LogLevel::Warning, &msg);
                     } else {
-                        msg.push_str(" — table may not have needed vacuuming, or another process already cleaned it up");
+                        logger.log(LogLevel::Info, &msg);
                     }
-                    logger.log(LogLevel::Warning, &msg);
-                } else if let Some(n) = result.dead_tuples_removed {
-                    logger.log(
-                        LogLevel::Info,
-                        &format!(
-                            "VACUUM on \"{}\".\"{}\" removed {n} dead tuple(s)",
-                            t.schema_name, t.table_name
-                        ),
-                    );
                 }
                 log_maintenance_operation(
                     client,
@@ -1867,7 +1854,7 @@ pub async fn run_needs_vacuum(
                         mode: "needs-vacuum",
                         status: "success",
                         dead_tuples_before: result.dead_tuples_before,
-                        dead_tuples_removed: result.dead_tuples_removed,
+                        dead_tuples_reduced_approx: result.dead_tuples_reduced_approx,
                         duration_ms,
                         error_message: None,
                     },
@@ -1903,7 +1890,7 @@ pub async fn run_needs_vacuum(
                             mode: "needs-vacuum",
                             status: "error",
                             dead_tuples_before: None,
-                            dead_tuples_removed: None,
+                            dead_tuples_reduced_approx: None,
                             duration_ms,
                             error_message: Some(&e.to_string()),
                         },
@@ -2049,7 +2036,7 @@ pub async fn run_vacuum_overdue(
                         mode: "vacuum-overdue",
                         status: "success",
                         dead_tuples_before: result.dead_tuples_before,
-                        dead_tuples_removed: result.dead_tuples_removed,
+                        dead_tuples_reduced_approx: result.dead_tuples_reduced_approx,
                         duration_ms,
                         error_message: None,
                     },
@@ -2085,7 +2072,7 @@ pub async fn run_vacuum_overdue(
                             mode: "vacuum-overdue",
                             status: "error",
                             dead_tuples_before: None,
-                            dead_tuples_removed: None,
+                            dead_tuples_reduced_approx: None,
                             duration_ms,
                             error_message: Some(&e.to_string()),
                         },
@@ -2230,7 +2217,7 @@ pub async fn run_analyze_overdue(
                         mode: "analyze-overdue",
                         status: "success",
                         dead_tuples_before: result.dead_tuples_before,
-                        dead_tuples_removed: result.dead_tuples_removed,
+                        dead_tuples_reduced_approx: result.dead_tuples_reduced_approx,
                         duration_ms,
                         error_message: None,
                     },
@@ -2266,7 +2253,7 @@ pub async fn run_analyze_overdue(
                             mode: "analyze-overdue",
                             status: "error",
                             dead_tuples_before: None,
-                            dead_tuples_removed: None,
+                            dead_tuples_reduced_approx: None,
                             duration_ms,
                             error_message: Some(&e.to_string()),
                         },
@@ -2715,7 +2702,7 @@ pub async fn log_initial_xmin_horizon(
 }
 
 /// Check the vacuum horizon and return a description of the worst blocker, if any.
-/// Used to enrich the "0 dead tuples removed" warning per-table.
+/// Used to enrich the "estimated dead tuples did not decrease" warning per-table.
 pub async fn describe_worst_xmin_blocker(client: &Client) -> Result<Option<String>> {
     match observe_xmin_horizon(client).await? {
         HorizonObservation::Unobservable => Ok(None),
@@ -2866,14 +2853,14 @@ async fn vacuum_analyze_table(
         .await?
         .get(0);
 
-    let removed = vacuum_output::get_dead_tuples_removed(dead_before, dead_after);
+    let reduced = vacuum_output::estimate_dead_tuples_reduced(dead_before, dead_after);
     Ok(OperationResult {
         dead_tuples_before: if dead_before > 0 {
             Some(dead_before)
         } else {
             None
         },
-        dead_tuples_removed: removed,
+        dead_tuples_reduced_approx: reduced,
     })
 }
 
@@ -3026,14 +3013,16 @@ pub async fn run_also_tables(
                     OP_VACUUM_ANALYZE,
                     start.elapsed(),
                 );
-                if let Some(n) = result.dead_tuples_removed
+                if let Some(n) = result.dead_tuples_reduced_approx
                     && n > 0
                 {
                     logger.log(
                         LogLevel::Info,
-                        &format!(
-                            "VACUUM (ANALYZE) on \"{}\".\"{}\" removed {n} dead tuple(s)",
-                            t.schema_name, t.table_name
+                        &vacuum_output::format_dead_tuple_change(
+                            "VACUUM (ANALYZE)",
+                            &t.schema_name,
+                            &t.table_name,
+                            n,
                         ),
                     );
                 }
@@ -3047,7 +3036,7 @@ pub async fn run_also_tables(
                         mode: "also-tables",
                         status: "success",
                         dead_tuples_before: result.dead_tuples_before,
-                        dead_tuples_removed: result.dead_tuples_removed,
+                        dead_tuples_reduced_approx: result.dead_tuples_reduced_approx,
                         duration_ms,
                         error_message: None,
                     },
@@ -3083,7 +3072,7 @@ pub async fn run_also_tables(
                             mode: "also-tables",
                             status: "error",
                             dead_tuples_before: None,
-                            dead_tuples_removed: None,
+                            dead_tuples_reduced_approx: None,
                             duration_ms,
                             error_message: Some(&e.to_string()),
                         },
