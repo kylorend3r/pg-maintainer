@@ -14,6 +14,8 @@ pub struct RunPolicy {
     pub force: bool,
     pub skip_active_vacuum: bool,
     pub check_xmin_horizon: bool,
+    /// Session lock_timeout in milliseconds (used in skip messages).
+    pub lock_timeout_ms: u64,
     /// Number of times to retry a table's VACUUM/ANALYZE after it fails on
     /// lock_timeout, before falling back to skipping it. 0 = no retry.
     pub lock_timeout_retries: u32,

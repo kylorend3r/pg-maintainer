@@ -331,13 +331,14 @@ pub async fn connect_raw(
 
 /// Set lock_timeout for the current session.
 ///
-/// VACUUM/ANALYZE need ShareUpdateExclusiveLock. With a 10 ms timeout the
-/// operation fails fast instead of blocking indefinitely when another process
-/// holds a conflicting lock. The caller should treat lock-timeout errors as
-/// skipped rather than hard failures.
-pub async fn set_lock_timeout(client: &tokio_postgres::Client) -> Result<()> {
+/// VACUUM/ANALYZE need ShareUpdateExclusiveLock. With a short timeout (default
+/// 10 ms) the operation fails fast instead of blocking indefinitely when
+/// another process holds a conflicting lock. The caller should treat
+/// lock-timeout errors as skipped rather than hard failures. `timeout_ms` must
+/// be non-zero: PostgreSQL treats 0 as "wait forever".
+pub async fn set_lock_timeout(client: &tokio_postgres::Client, timeout_ms: u64) -> Result<()> {
     client
-        .execute("SET lock_timeout TO '10ms'", &[])
+        .execute(&format!("SET lock_timeout TO '{timeout_ms}ms'"), &[])
         .await
         .context("Failed to set lock_timeout")?;
     Ok(())
