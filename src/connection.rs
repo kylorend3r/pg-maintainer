@@ -427,24 +427,43 @@ pub async fn set_vacuum_buffer_usage_limit(client: &tokio_postgres::Client) -> R
 /// Note: has no effect on VACUUM calls that pass INDEX_CLEANUP FALSE (Phase 3/freeze),
 /// since there's no index-cleanup phase to parallelize in that case.
 ///
+/// With `requested = Some(n)` (from --vacuum-parallel) the value is capped at
+/// `min(n, max_parallel_workers)` instead; `None` keeps the legacy behaviour of
+/// using the whole `max_parallel_workers` pool.
+///
 /// Returns the value applied so the caller can log it.
-pub async fn set_max_parallel_maintenance_workers(client: &tokio_postgres::Client) -> Result<i32> {
+pub async fn set_max_parallel_maintenance_workers(
+    client: &tokio_postgres::Client,
+    requested: Option<u32>,
+) -> Result<i32> {
     let row = client
         .query_one("SELECT current_setting('max_parallel_workers')::int", &[])
         .await
         .context("Failed to read max_parallel_workers")?;
 
     let max_parallel_workers: i32 = row.get(0);
+    let applied = effective_parallel_workers(requested, max_parallel_workers);
 
     client
         .execute(
-            &format!("SET max_parallel_maintenance_workers TO {max_parallel_workers}"),
+            &format!("SET max_parallel_maintenance_workers TO {applied}"),
             &[],
         )
         .await
         .context("Failed to set max_parallel_maintenance_workers")?;
 
-    Ok(max_parallel_workers)
+    Ok(applied)
+}
+
+/// The `max_parallel_maintenance_workers` value to apply: the whole
+/// `max_parallel_workers` pool unless the user asked for a specific degree.
+pub fn effective_parallel_workers(requested: Option<u32>, max_parallel_workers: i32) -> i32 {
+    match requested {
+        Some(n) => i32::try_from(n)
+            .unwrap_or(i32::MAX)
+            .min(max_parallel_workers),
+        None => max_parallel_workers,
+    }
 }
 
 pub fn format_kb_readable(kb: i64) -> String {
@@ -454,5 +473,18 @@ pub fn format_kb_readable(kb: i64) -> String {
         format!("{:.1}MB", kb as f64 / 1024.0)
     } else {
         format!("{kb}kB")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_effective_parallel_workers() {
+        assert_eq!(effective_parallel_workers(None, 8), 8);
+        assert_eq!(effective_parallel_workers(Some(0), 8), 0);
+        assert_eq!(effective_parallel_workers(Some(3), 8), 3);
+        assert_eq!(effective_parallel_workers(Some(16), 8), 8);
     }
 }

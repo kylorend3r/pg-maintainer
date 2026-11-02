@@ -707,18 +707,24 @@ fn quote_ident(s: &str) -> String {
     s.replace('"', "\"\"")
 }
 
-async fn vacuum_table(
-    client: &Client,
-    schema: &str,
-    table: &str,
-    vacuum_opts: VacuumOptions,
-) -> Result<OperationResult, tokio_postgres::Error> {
-    // Get dead tuple count before VACUUM
-    let dead_before: i64 = client
-        .query_one(queries::GET_DEAD_TUPLE_COUNT, &[&schema, &table])
-        .await?
-        .get(0);
+/// Append the `PARALLEL n` clause when one was requested.
+fn push_parallel(opts: &mut Vec<String>, v: VacuumOptions) {
+    if let Some(n) = v.parallel {
+        opts.push(format!("PARALLEL {n}"));
+    }
+}
 
+fn vacuum_statement(opts: &[String], schema: &str, table: &str) -> String {
+    format!(
+        "VACUUM ({}) \"{}\".\"{}\"",
+        opts.join(", "),
+        quote_ident(schema),
+        quote_ident(table)
+    )
+}
+
+/// VACUUM statement for the regular (non-freeze) modes.
+fn vacuum_sql(schema: &str, table: &str, vacuum_opts: VacuumOptions) -> String {
     let mut opts = vec!["VERBOSE".to_string()];
     if !vacuum_opts.truncate {
         opts.push("TRUNCATE FALSE".to_string());
@@ -734,12 +740,66 @@ async fn vacuum_table(
         Some(false) => opts.push("INDEX_CLEANUP FALSE".to_string()),
         None => {}
     }
-    let sql = format!(
-        "VACUUM ({}) \"{}\".\"{}\"",
-        opts.join(", "),
-        quote_ident(schema),
-        quote_ident(table)
-    );
+    push_parallel(&mut opts, vacuum_opts);
+    vacuum_statement(&opts, schema, table)
+}
+
+/// VACUUM FREEZE statement for prevent-wraparound.
+/// INDEX_CLEANUP FALSE avoids index bloat during aggressive freeze passes.
+/// VERBOSE surfaces progress notices to the PostgreSQL log.
+fn freeze_sql(schema: &str, table: &str, vacuum_opts: VacuumOptions) -> String {
+    let mut opts = vec!["VERBOSE".to_string(), "FREEZE".to_string()];
+    match vacuum_opts.index_cleanup {
+        Some(true) => opts.push("INDEX_CLEANUP TRUE".to_string()),
+        Some(false) | None => opts.push("INDEX_CLEANUP FALSE".to_string()),
+    }
+    if !vacuum_opts.truncate {
+        opts.push("TRUNCATE FALSE".to_string());
+    }
+    if vacuum_opts.disable_page_skipping {
+        opts.push("DISABLE_PAGE_SKIPPING".to_string());
+    }
+    if vacuum_opts.skip_locked {
+        opts.push("SKIP_LOCKED".to_string());
+    }
+    push_parallel(&mut opts, vacuum_opts);
+    vacuum_statement(&opts, schema, table)
+}
+
+/// VACUUM (ANALYZE) statement for --also-tables.
+fn vacuum_analyze_sql(schema: &str, table: &str, vacuum_opts: VacuumOptions) -> String {
+    let mut opts = vec!["VERBOSE".to_string(), "ANALYZE".to_string()];
+    if !vacuum_opts.truncate {
+        opts.push("TRUNCATE FALSE".to_string());
+    }
+    if vacuum_opts.disable_page_skipping {
+        opts.push("DISABLE_PAGE_SKIPPING".to_string());
+    }
+    if vacuum_opts.skip_locked {
+        opts.push("SKIP_LOCKED".to_string());
+    }
+    match vacuum_opts.index_cleanup {
+        Some(true) => opts.push("INDEX_CLEANUP TRUE".to_string()),
+        Some(false) => opts.push("INDEX_CLEANUP FALSE".to_string()),
+        None => {}
+    }
+    push_parallel(&mut opts, vacuum_opts);
+    vacuum_statement(&opts, schema, table)
+}
+
+async fn vacuum_table(
+    client: &Client,
+    schema: &str,
+    table: &str,
+    vacuum_opts: VacuumOptions,
+) -> Result<OperationResult, tokio_postgres::Error> {
+    // Get dead tuple count before VACUUM
+    let dead_before: i64 = client
+        .query_one(queries::GET_DEAD_TUPLE_COUNT, &[&schema, &table])
+        .await?
+        .get(0);
+
+    let sql = vacuum_sql(schema, table, vacuum_opts);
     client.execute(&sql, &[]).await?;
 
     // Get dead tuple count after VACUUM
@@ -782,28 +842,7 @@ async fn freeze_table(
     table: &str,
     vacuum_opts: VacuumOptions,
 ) -> Result<OperationResult, tokio_postgres::Error> {
-    // INDEX_CLEANUP FALSE avoids index bloat during aggressive freeze passes.
-    // VERBOSE surfaces progress notices to the PostgreSQL log.
-    let mut opts = vec!["VERBOSE".to_string(), "FREEZE".to_string()];
-    match vacuum_opts.index_cleanup {
-        Some(true) => opts.push("INDEX_CLEANUP TRUE".to_string()),
-        Some(false) | None => opts.push("INDEX_CLEANUP FALSE".to_string()),
-    }
-    if !vacuum_opts.truncate {
-        opts.push("TRUNCATE FALSE".to_string());
-    }
-    if vacuum_opts.disable_page_skipping {
-        opts.push("DISABLE_PAGE_SKIPPING".to_string());
-    }
-    if vacuum_opts.skip_locked {
-        opts.push("SKIP_LOCKED".to_string());
-    }
-    let sql = format!(
-        "VACUUM ({}) \"{}\".\"{}\"",
-        opts.join(", "),
-        quote_ident(schema),
-        quote_ident(table)
-    );
+    let sql = freeze_sql(schema, table, vacuum_opts);
     client.execute(&sql, &[]).await?;
     Ok(OperationResult {
         dead_tuples_before: None,
@@ -2817,27 +2856,7 @@ async fn vacuum_analyze_table(
         .await?
         .get(0);
 
-    let mut opts = vec!["VERBOSE".to_string(), "ANALYZE".to_string()];
-    if !vacuum_opts.truncate {
-        opts.push("TRUNCATE FALSE".to_string());
-    }
-    if vacuum_opts.disable_page_skipping {
-        opts.push("DISABLE_PAGE_SKIPPING".to_string());
-    }
-    if vacuum_opts.skip_locked {
-        opts.push("SKIP_LOCKED".to_string());
-    }
-    match vacuum_opts.index_cleanup {
-        Some(true) => opts.push("INDEX_CLEANUP TRUE".to_string()),
-        Some(false) => opts.push("INDEX_CLEANUP FALSE".to_string()),
-        None => {}
-    }
-    let sql = format!(
-        "VACUUM ({}) \"{}\".\"{}\"",
-        opts.join(", "),
-        quote_ident(schema),
-        quote_ident(table)
-    );
+    let sql = vacuum_analyze_sql(schema, table, vacuum_opts);
     client.execute(&sql, &[]).await?;
 
     let dead_after: i64 = client
@@ -3105,6 +3124,72 @@ mod tests {
         assert_eq!(
             lock_timeout_skip_message(policy(10, 3), "public", "big"),
             "Skipping \"public\".\"big\" — could not acquire lock within 10ms after 3 retries"
+        );
+    }
+
+    fn opts(parallel: Option<u32>) -> VacuumOptions {
+        VacuumOptions {
+            truncate: true,
+            disable_page_skipping: false,
+            skip_locked: false,
+            index_cleanup: None,
+            parallel,
+        }
+    }
+
+    fn all_flags(parallel: Option<u32>) -> VacuumOptions {
+        VacuumOptions {
+            truncate: false,
+            disable_page_skipping: true,
+            skip_locked: true,
+            index_cleanup: Some(true),
+            parallel,
+        }
+    }
+
+    // Golden strings: with `parallel: None` the SQL must be byte-identical to
+    // what the tool generated before --vacuum-parallel existed.
+    #[test]
+    fn test_golden_sql_without_parallel() {
+        assert_eq!(
+            vacuum_sql("public", "t", opts(None)),
+            "VACUUM (VERBOSE) \"public\".\"t\""
+        );
+        assert_eq!(
+            freeze_sql("public", "t", opts(None)),
+            "VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE) \"public\".\"t\""
+        );
+        assert_eq!(
+            vacuum_analyze_sql("public", "t", opts(None)),
+            "VACUUM (VERBOSE, ANALYZE) \"public\".\"t\""
+        );
+        assert_eq!(
+            vacuum_sql("public", "t", all_flags(None)),
+            "VACUUM (VERBOSE, TRUNCATE FALSE, DISABLE_PAGE_SKIPPING, SKIP_LOCKED, INDEX_CLEANUP TRUE) \"public\".\"t\""
+        );
+        assert_eq!(
+            freeze_sql("public", "t", all_flags(None)),
+            "VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP TRUE, TRUNCATE FALSE, DISABLE_PAGE_SKIPPING, SKIP_LOCKED) \"public\".\"t\""
+        );
+        assert_eq!(
+            vacuum_analyze_sql("public", "t", all_flags(None)),
+            "VACUUM (VERBOSE, ANALYZE, TRUNCATE FALSE, DISABLE_PAGE_SKIPPING, SKIP_LOCKED, INDEX_CLEANUP TRUE) \"public\".\"t\""
+        );
+    }
+
+    #[test]
+    fn test_parallel_is_appended_last() {
+        assert_eq!(
+            vacuum_sql("public", "t", opts(Some(4))),
+            "VACUUM (VERBOSE, PARALLEL 4) \"public\".\"t\""
+        );
+        assert_eq!(
+            freeze_sql("public", "t", opts(Some(0))),
+            "VACUUM (VERBOSE, FREEZE, INDEX_CLEANUP FALSE, PARALLEL 0) \"public\".\"t\""
+        );
+        assert_eq!(
+            vacuum_analyze_sql("public", "t", all_flags(Some(4))),
+            "VACUUM (VERBOSE, ANALYZE, TRUNCATE FALSE, DISABLE_PAGE_SKIPPING, SKIP_LOCKED, INDEX_CLEANUP TRUE, PARALLEL 4) \"public\".\"t\""
         );
     }
 }

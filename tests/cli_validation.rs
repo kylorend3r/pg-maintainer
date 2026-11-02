@@ -1202,6 +1202,82 @@ fn test_vacuum_index_cleanup_omitted_accepted() {
         .code(predicate::ne(2));
 }
 
+// ── Parallel VACUUM (--vacuum-parallel) ──────────────────────────────────────
+
+#[test]
+fn test_vacuum_parallel_omitted_and_values_accepted() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--dry-run")
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2));
+
+    for n in ["0", "4", "1024"] {
+        cmd()
+            .arg("--schema")
+            .arg("public")
+            .arg("--vacuum-parallel")
+            .arg(n)
+            .arg("--dry-run")
+            .env_clear()
+            .assert()
+            .code(predicate::ne(2));
+    }
+}
+
+#[test]
+fn test_vacuum_parallel_above_max_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--mode")
+        .arg("never-vacuumed")
+        .arg("--vacuum-parallel")
+        .arg("1025")
+        .env_clear()
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--vacuum-parallel"))
+        .stderr(predicate::str::contains("between 0 and 1024"));
+}
+
+#[test]
+fn test_vacuum_parallel_not_a_number_rejected() {
+    cmd()
+        .arg("--schema")
+        .arg("public")
+        .arg("--vacuum-parallel")
+        .arg("many")
+        .env_clear()
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[test]
+fn test_config_file_with_vacuum_parallel_key() {
+    let mut f = Builder::new().suffix(".toml").tempfile().unwrap();
+    writeln!(
+        f,
+        r#"
+schema = "public"
+mode = ["never-vacuumed"]
+vacuum-parallel = 4
+"#
+    )
+    .unwrap();
+
+    cmd()
+        .arg("--config")
+        .arg(f.path())
+        .env_clear()
+        .assert()
+        .code(predicate::ne(2))
+        .stderr(predicate::str::contains("--vacuum-parallel").not());
+}
+
 #[test]
 fn test_config_file_with_throttling_keys() {
     let mut f = Builder::new().suffix(".toml").tempfile().unwrap();

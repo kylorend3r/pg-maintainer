@@ -5,6 +5,9 @@ pub const DEFAULT_POSTGRES_DATABASE: &str = "postgres";
 pub const DEFAULT_POSTGRES_USERNAME: &str = "postgres";
 pub const DEFAULT_CONNECT_TIMEOUT_SECONDS: u64 = 10;
 
+// Upper bound PostgreSQL accepts for VACUUM (PARALLEL n).
+pub const MAX_VACUUM_PARALLEL: u32 = 1024;
+
 // Maintenance work memory
 pub const DEFAULT_MAINTENANCE_WORK_MEM_GB: u64 = 1;
 pub const MAX_MAINTENANCE_WORK_MEM_GB: u64 = 32;

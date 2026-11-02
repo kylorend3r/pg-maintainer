@@ -5,6 +5,9 @@ pub struct VacuumOptions {
     pub disable_page_skipping: bool,
     pub skip_locked: bool,
     pub index_cleanup: Option<bool>,
+    /// Explicit `PARALLEL n` degree. `None` omits the clause and leaves the
+    /// decision to PostgreSQL.
+    pub parallel: Option<u32>,
 }
 
 /// Shared run-level policy flags threaded through every maintenance phase.
