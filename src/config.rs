@@ -14,6 +14,12 @@ pub const TCP_KEEPALIVE_IDLE_SECONDS: u64 = 30;
 pub const TCP_KEEPALIVE_INTERVAL_SECONDS: u64 = 10;
 pub const TCP_KEEPALIVE_RETRIES: u32 = 3;
 
+// Shutdown handling: grace between pg_cancel_backend and pg_terminate_backend,
+// and how long to wait for the short-lived control connection that issues them.
+pub const DEFAULT_SHUTDOWN_GRACE_SECONDS: u64 = 10;
+pub const MAX_SHUTDOWN_GRACE_SECONDS: u64 = 300;
+pub const CONTROL_CONNECT_TIMEOUT_SECONDS: u64 = 5;
+
 // Maintenance work memory
 pub const DEFAULT_MAINTENANCE_WORK_MEM_GB: u64 = 1;
 pub const MAX_MAINTENANCE_WORK_MEM_GB: u64 = 32;

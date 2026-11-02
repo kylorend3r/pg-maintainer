@@ -76,6 +76,13 @@ maintenance-work-mem-gb = 1   # max: 32
 # lock-timeout-retries         = 0     # 0-20; 0 = skip immediately (default)
 # lock-timeout-retry-delay-ms  = 50    # 1-60000; doubles after each retry
 
+# ── Shutdown (SIGTERM / SIGINT) ───────────────────────────────────────────────
+# What to do with the running VACUUM/ANALYZE: "cancel" (pg_cancel_backend, then
+# pg_terminate_backend after the grace period), "terminate" (immediately) or
+# "finish" (let it complete, the legacy behavior). A second signal terminates at once.
+# shutdown-mode          = "cancel"
+# shutdown-grace-seconds = 10          # 1-300; wait between cancel and terminate
+
 # ── VACUUM options ────────────────────────────────────────────────────────────
 vacuum-truncate = true                # truncate empty pages at end of table (default: true)
 # vacuum-disable-page-skipping = false # disable skipping all-visible pages (default: false)

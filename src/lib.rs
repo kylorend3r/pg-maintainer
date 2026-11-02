@@ -7,5 +7,6 @@ pub mod logging;
 pub mod operations;
 pub mod queries;
 pub mod schema;
+pub mod shutdown;
 pub mod types;
 pub mod vacuum_output;

@@ -3,6 +3,26 @@ pub const SET_STATEMENT_TIMEOUT: &str = "SET statement_timeout TO 0";
 pub const SET_IDLE_SESSION_TIMEOUT: &str = "SET idle_session_timeout TO 0";
 pub const SET_APPLICATION_NAME: &str = "SET application_name TO 'pg-maintainer'";
 
+// Shutdown handling — run on a separate control connection.
+pub const GET_BACKEND_PID: &str = "SELECT pg_backend_pid()";
+
+/// State of the maintenance backend ($1 = pid). Columns:
+///   active              — state = 'active'
+///   maintenance_running — active AND the statement is a VACUUM or ANALYZE, so a
+///                         discovery query or logbook INSERT is never cancelled
+///   query_start         — start of the current statement, as text, used to tell
+///                         "still the same statement" apart from "a new one"
+pub const GET_BACKEND_ACTIVITY: &str = r#"
+SELECT coalesce(state = 'active', false) AS active,
+       coalesce(state = 'active' AND query ~* '^\s*(vacuum|analyze)\y', false) AS maintenance_running,
+       query_start::text AS query_start
+FROM pg_stat_activity
+WHERE pid = $1
+"#;
+
+pub const CANCEL_BACKEND: &str = "SELECT pg_cancel_backend($1)";
+pub const TERMINATE_BACKEND: &str = "SELECT pg_terminate_backend($1)";
+
 // Schema discovery — excludes system and tool-managed schemas
 pub const GET_ALL_USER_SCHEMAS: &str = r#"
     SELECT nspname
