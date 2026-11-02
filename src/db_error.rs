@@ -89,6 +89,24 @@ pub fn is_connection_lost(err: &anyhow::Error) -> bool {
     })
 }
 
+/// "message (SQLSTATE code)", the form used for server-reported causes.
+fn format_server_cause(message: &str, sqlstate: &str) -> String {
+    format!("{message} (SQLSTATE {sqlstate})")
+}
+
+/// Human-readable cause for a failed statement. `tokio_postgres::Error`'s own
+/// `Display` is just "db error" for server-reported errors, so spell out the
+/// server's message and SQLSTATE; otherwise append the underlying source.
+pub fn describe_pg_error(err: &tokio_postgres::Error) -> String {
+    if let Some(db) = err.as_db_error() {
+        return format_server_cause(db.message(), db.code().code());
+    }
+    match std::error::Error::source(err) {
+        Some(source) => format!("{err}: {source}"),
+        None => err.to_string(),
+    }
+}
+
 /// Process exit code for a fatal error: 3 for a lost connection, 1 otherwise.
 pub fn exit_code_for(err: &anyhow::Error) -> u8 {
     if is_connection_lost(err) { 3 } else { 1 }
@@ -164,6 +182,17 @@ mod tests {
         let io = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
         let err = Err::<(), _>(io).context("query failed").unwrap_err();
         assert_eq!(exit_code_for(&err), 3);
+    }
+
+    #[test]
+    fn test_format_server_cause() {
+        assert_eq!(
+            format_server_cause(
+                "terminating connection due to administrator command",
+                "57P01"
+            ),
+            "terminating connection due to administrator command (SQLSTATE 57P01)"
+        );
     }
 
     #[test]

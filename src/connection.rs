@@ -272,10 +272,10 @@ pub async fn connect_raw(
             .connect(NoTls)
             .await
             .context("Failed to connect to PostgreSQL")?;
+        // A driver error surfaces through the client's next call, where it is
+        // reported once with table context; printing it here would duplicate it.
         tokio::spawn(async move {
-            if let Err(e) = conn.await {
-                eprintln!("Connection error: {e}");
-            }
+            let _ = conn.await;
         });
         return Ok(client);
     }
@@ -338,9 +338,7 @@ pub async fn connect_raw(
         .context("Failed to connect to PostgreSQL with SSL")?;
 
     tokio::spawn(async move {
-        if let Err(e) = conn.await {
-            eprintln!("Connection error: {e}");
-        }
+        let _ = conn.await;
     });
 
     Ok(client)

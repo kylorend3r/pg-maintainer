@@ -1177,7 +1177,7 @@ pub async fn run_vacuum_never_vacuumed(
                         &t.schema_name,
                         &t.table_name,
                         Some((i + 1, tables.len())),
-                        &e.to_string(),
+                        &db_error::describe_pg_error(&e),
                     ));
                 }
                 let duration_ms = start.elapsed().as_millis() as i64;
@@ -1364,7 +1364,7 @@ pub async fn run_analyze_never_analyzed(
                         &t.schema_name,
                         &t.table_name,
                         Some((i + 1, tables.len())),
-                        &e.to_string(),
+                        &db_error::describe_pg_error(&e),
                     ));
                 }
                 let duration_ms = start.elapsed().as_millis() as i64;
@@ -1593,7 +1593,7 @@ pub async fn run_freeze_wraparound(
                         &t.schema_name,
                         &t.table_name,
                         Some((i + 1, tables.len())),
-                        &e.to_string(),
+                        &db_error::describe_pg_error(&e),
                     ));
                 }
                 let duration_ms = start.elapsed().as_millis() as i64;
@@ -1809,7 +1809,7 @@ pub async fn run_bloat_vacuum(
                         &t.schema_name,
                         &t.table_name,
                         Some((i + 1, tables.len())),
-                        &e.to_string(),
+                        &db_error::describe_pg_error(&e),
                     ));
                 }
                 let duration_ms = start.elapsed().as_millis() as i64;
@@ -2039,7 +2039,7 @@ pub async fn run_needs_vacuum(
                         &t.schema_name,
                         &t.table_name,
                         Some((i + 1, tables.len())),
-                        &e.to_string(),
+                        &db_error::describe_pg_error(&e),
                     ));
                 }
                 let duration_ms = start.elapsed().as_millis() as i64;
@@ -2238,7 +2238,7 @@ pub async fn run_vacuum_overdue(
                         &t.schema_name,
                         &t.table_name,
                         Some((i + 1, tables.len())),
-                        &e.to_string(),
+                        &db_error::describe_pg_error(&e),
                     ));
                 }
                 let duration_ms = start.elapsed().as_millis() as i64;
@@ -2436,7 +2436,7 @@ pub async fn run_analyze_overdue(
                         &t.schema_name,
                         &t.table_name,
                         Some((i + 1, tables.len())),
-                        &e.to_string(),
+                        &db_error::describe_pg_error(&e),
                     ));
                 }
                 let duration_ms = start.elapsed().as_millis() as i64;
@@ -3252,7 +3252,7 @@ pub async fn run_also_tables(
                         &t.schema_name,
                         &t.table_name,
                         Some((i + 1, tables.len())),
-                        &e.to_string(),
+                        &db_error::describe_pg_error(&e),
                     ));
                 }
                 let duration_ms = start.elapsed().as_millis() as i64;
